@@ -260,6 +260,10 @@ class Trainer:
             if self.iteration % sch.checkpoint_interval == 0:
                 self.save("ckpt_latest.pt")
                 self.save(f"ckpt_{self.iteration:07d}.pt")
+                # Rotate numbered checkpoints so long runs don't fill the disk.
+                keep = max(1, int(getattr(sch, "keep_checkpoints", 4)))
+                for old in sorted(self.log_dir.glob("ckpt_[0-9]*.pt"))[:-keep]:
+                    old.unlink(missing_ok=True)
             if sch.max_hours is not None and self.iteration % sch.log_interval == 0:
                 stop = float((time.time() - t_start) / 3600 > sch.max_hours)
                 if self.world > 1:

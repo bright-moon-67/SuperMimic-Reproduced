@@ -45,6 +45,7 @@ class ScheduleCfg:
     lr_decay_fraction: float = 250_000 / 320_000
     log_interval: int = 50  # iterations
     checkpoint_interval: int = 4000  # iterations
+    keep_checkpoints: int = 4  # rotate numbered checkpoints, keep the most recent N
     max_hours: float | None = None
 
 
