@@ -68,6 +68,7 @@ def imagine(
     # Initial observation history from the logged states/actions (noise re-sampled per frame).
     hist = [add_noise(analytic_observation(start.hist_states[i], start.hist_actions[i], start.xi, q0)) for i in range(start.hist_states.shape[0])]
     s = start.state
+    z = wm.encode_state(s, start.xi) if wm.is_koopman else None
     frame = start.frame.clone()
     a_prev = start.prev_action
     c = torch.ones(n, device=device)
@@ -98,7 +99,9 @@ def imagine(
     for t in range(horizon):
         obs_flat = flatten_history_term_major(torch.stack(hist, 0))
         a = policy(obs_flat, goals[-1])
-        s_next, r, term_vec, logits, obs_clean, anchor_pose = step_fn(s, a, a_prev, start.xi, ref)
+        if wm.is_koopman and wm.cfg.koopman_mode == "reencode":
+            z = wm.encode_state(s, start.xi)  # re-encode the predicted state every step
+        s_next, z, r, term_vec, logits, obs_clean, anchor_pose = step_fn(z, s, a, a_prev, start.xi, ref)
         d = torch.sigmoid(logits)
         c = c * (1.0 - d)
         term_sum += term_vec.detach().mean(-1)

@@ -100,7 +100,7 @@ class Trainer:
         self.num_updates = 0
         self._utd_acc = 0.0
         if cfg.resume is not None:
-            self.load(cfg.resume)
+            self.load(cfg.resume, skip=cfg.resume_skip)
 
     # ------------------------------------------------------------------ checkpoints
 
@@ -124,20 +124,32 @@ class Trainer:
             self.log_dir / name,
         )
 
-    def load(self, path: Path) -> None:
+    def load(self, path: Path, skip: str | None = None) -> None:
+        """Load a checkpoint, optionally skipping keys listed in ``skip`` (comma-separated).
+
+        Used to continue a trained actor/critic under a different world model
+        (Koopman experiments B: ``--resume-skip wm``).
+        """
+        skip_keys = {k.strip() for k in (skip or "").split(",") if k.strip()}
         ck = torch.load(path, map_location=self.device, weights_only=False)
-        self.wm.load_state_dict(ck["wm"])
-        self.policy.load_state_dict(ck["policy"])
-        self.critic.load_state_dict(ck["critic"])
-        self.wm_trainer.opt.load_state_dict(ck["wm_opt"])
-        self.policy_trainer.opt.load_state_dict(ck["policy_opt"])
-        self.policy_trainer.critic_opt.load_state_dict(ck["critic_opt"])
+        if "wm" not in skip_keys:
+            self.wm.load_state_dict(ck["wm"])
+        if "policy" not in skip_keys:
+            self.policy.load_state_dict(ck["policy"])
+        if "critic" not in skip_keys:
+            self.critic.load_state_dict(ck["critic"])
+        if "wm" not in skip_keys and "wm_opt" not in skip_keys:
+            self.wm_trainer.opt.load_state_dict(ck["wm_opt"])
+        if "policy" not in skip_keys and "policy_opt" not in skip_keys:
+            self.policy_trainer.opt.load_state_dict(ck["policy_opt"])
+        if "critic" not in skip_keys and "critic_opt" not in skip_keys:
+            self.policy_trainer.critic_opt.load_state_dict(ck["critic_opt"])
         self.command.bin_return.copy_(ck["bin_return"])
         self.command.bin_memory.copy_(ck["bin_memory"])
         self.iteration = ck["iteration"]
         self.start_iteration = self.iteration
         self.num_updates = ck["num_updates"]
-        print(f"[INFO] resumed from {path} at iteration {self.iteration}")
+        print(f"[INFO] resumed from {path} at iteration {self.iteration} (skip: {sorted(skip_keys) or 'none'})")
 
     # ------------------------------------------------------------------ main loop
 
