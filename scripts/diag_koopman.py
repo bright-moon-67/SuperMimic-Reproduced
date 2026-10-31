@@ -110,8 +110,8 @@ def _load_windows(path: Path | None, device: str) -> WindowBatch | None:
     return WindowBatch(**{k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in d.items()})
 
 
-def _row(wm: WorldModel, w: WindowBatch, mode: str) -> dict:
-    d = wm.rollout_diagnostics(w.states, w.a_exec, w.xi, mode=mode)
+def _row(wm: WorldModel, w: WindowBatch, mode: str, n_sigma: int) -> dict:
+    d = wm.rollout_diagnostics(w.states, w.a_exec, w.xi, mode=mode, n_sigma=n_sigma)
     nse = d["nse"]
     groups = d["nse_groups"]
     return {
@@ -126,9 +126,15 @@ def _row(wm: WorldModel, w: WindowBatch, mode: str) -> dict:
         ],
         "group_names": ["root_pos", "root_rot", "root_lin_vel", "root_ang_vel", "joint_pos", "joint_vel"],
         "z_norm": [_f(x) for x in d["z_norm"].tolist()],
-        "cons_abs": [_f(x) for x in d["cons_abs"].tolist()],
+        "cons_abs": [_f(x) for x in d["cons_abs"].tolist()],  # legacy MSE alias
+        "cons_mse": [_f(x) for x in d["cons_mse"].tolist()],
+        "cons_l2": [_f(x) for x in d["cons_l2"].tolist()],
         "cons_rel": [_f(x) for x in d["cons_rel"].tolist()],
         "cons_rel_mean": _f(d["cons_rel"].mean()),
+        "phi_cons_mse": [_f(x) for x in d["phi_cons_mse"].tolist()],
+        "phi_cons_l2": [_f(x) for x in d["phi_cons_l2"].tolist()],
+        "phi_cons_rel": [_f(x) for x in d["phi_cons_rel"].tolist()],
+        "phi_cons_rel_mean": _f(d["phi_cons_rel"].mean()),
         "latent_var_mean": _f(d["latent_var"].mean()),
         "latent_erank_mean": _f(d["latent_erank"].mean()),
         "sigma_max_M": [_f(x) for x in d["sigma_max_M"].tolist()],
@@ -167,7 +173,7 @@ def main(
             continue
         results[name] = {}
         for mode in modes:
-            results[name][mode] = _row(wm, w, mode)
+            results[name][mode] = _row(wm, w, mode, n_sigma)
         if wm.is_koopman and "latent" in modes and "reencode" in modes:
             w0 = w
             z0 = wm.encode_state(w0.states[0], w0.xi)

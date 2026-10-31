@@ -44,6 +44,10 @@ class KoopmanCfg:
     # Loss weights of the latent-consistency and reconstruction terms (plan §3).
     lambda_lift: float = 0.1
     lambda_rec: float = 0.1
+    # P2-A: propagated latent vs re-encoding of the predicted state.  For
+    # state-augmented Koopman this is applied to the phi block only, because the
+    # canonical-state block is already tied to the integration path.
+    lambda_cons: float = 0.0
     # A init: A = a_eye * I + a_noise * N(0, 1).
     a_eye: float = 0.99
     a_noise: float = 0.01
@@ -300,11 +304,14 @@ class StateAugmentedKoopman(nn.Module):
         self.B = nn.Parameter(torch.zeros(D, act_dim))
         self.C = nn.Parameter(torch.zeros(D, xi_dim))
         self.b = nn.Parameter(torch.zeros(D))
-        self.U = nn.Parameter(torch.zeros(act_dim, D, r))
+        # Break the U=V=0 / P=Q=0 / Wr=Ws=0 symmetry: one factor is small
+        # random, the other is zero.  The initial low-rank output is still zero,
+        # but the zero factor receives a non-zero gradient immediately.
+        self.U = nn.Parameter(self.cfg.bilinear_init * torch.randn(act_dim, D, r))
         self.V = nn.Parameter(torch.zeros(act_dim, D, r))
-        self.P = nn.Parameter(torch.zeros(xi_dim, D, rd))
+        self.P = nn.Parameter(self.cfg.bilinear_init * torch.randn(xi_dim, D, rd))
         self.Q = nn.Parameter(torch.zeros(xi_dim, D, rd))
-        self.Wr = nn.Parameter(torch.zeros(act_dim, D, rw))
+        self.Wr = nn.Parameter(self.cfg.bilinear_init * torch.randn(act_dim, D, rw))
         self.Ws = nn.Parameter(torch.zeros(act_dim, xi_dim, rw))
 
         # Linear state projection: delta = W_d u[:feat_dim].  Start as the

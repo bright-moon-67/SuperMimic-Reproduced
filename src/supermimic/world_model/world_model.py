@@ -18,6 +18,27 @@ _ERROR_GROUPS = ((0, 3), (3, 6), (6, 9), (9, 12), (12, 41), (41, 70))
 _ERROR_GROUP_NAMES = ("root_pos", "root_rot", "root_lin_vel", "root_ang_vel", "joint_pos", "joint_vel")
 
 
+def consistency_metrics(z_next: torch.Tensor, z_re: torch.Tensor, phi_dim: int | None = None) -> dict[str, torch.Tensor]:
+    """L2-consistent latent closure metrics.
+
+    ``cons_rel`` is ||z_next - z_re||_2 / ||z_next||_2, not RMS/L2.  When
+    ``phi_dim`` is given (state-augmented Koopman), the phi-only metrics are
+    appended as ``phi_mse`` / ``phi_l2`` / ``phi_rel``.
+    """
+    diff = z_next - z_re
+    mse = diff.pow(2).mean(-1)
+    l2 = diff.norm(dim=-1)
+    rel = l2 / (z_next.norm(dim=-1) + 1e-8)
+    out = {"mse": mse, "l2": l2, "rel": rel}
+    if phi_dim is not None:
+        pd = diff[..., phi_dim:]
+        pz = z_next[..., phi_dim:]
+        out["phi_mse"] = pd.pow(2).mean(-1)
+        out["phi_l2"] = pd.norm(dim=-1)
+        out["phi_rel"] = out["phi_l2"] / (pz.norm(dim=-1) + 1e-8)
+    return out
+
+
 @dataclass
 class WorldModelCfg:
     # "mlp" (baseline) or "koopman" (low-rank bilinear Deep Koopman, plan_one.md).
@@ -196,11 +217,14 @@ class WorldModel(nn.Module):
         xi_norm = self.spec.normalize_xi(xi)
         z = self.encode_state(s, xi)
         klift, krec = self.cfg.koopman.lambda_lift, self.cfg.koopman.lambda_rec
+        kcons = self.cfg.koopman.lambda_cons
         kstab = self.cfg.koopman.lambda_stab
+        state_in_latent = getattr(self.dynamics, "state_in_latent", False)
         total_state = 0.0
         total_term = 0.0
         total_lift = 0.0
         total_rec = 0.0
+        total_cons = 0.0
         total_stab = torch.zeros((), device=states.device)
         metrics = {}
         err_first = None
@@ -229,19 +253,26 @@ class WorldModel(nn.Module):
             total_lift = total_lift + (z - z_target).pow(2).mean(-1).mean()
             total_state = total_state + sq.sum(-1).mean()
             total_term = total_term + bce.mean()
+            # P2-A consistency: propagated z vs re-encoding the predicted state.
+            # For state-augmented Koopman only phi is supervised; the state block
+            # is already tied to the integration path.
+            cons_step = z - self.encode_state(s, xi)
+            if state_in_latent:
+                cons_step = cons_step[..., 71:]
+            total_cons = total_cons + cons_step.pow(2).mean()
             with torch.no_grad():
                 nse = sq.mean(-1).mean()
                 if j == 0:
                     err_first = nse
                 err_last = nse
                 acc_num += ((logits > 0).float() == done[j]).float().mean()
-                # plan §9 consistency diagnostic: propagated z vs re-encoding the predicted state
-                cons_num += (z - self.encode_state(s, xi)).pow(2).mean(-1).mean()
+                cons_num += cons_step.pow(2).mean().detach()
         loss = (
             total_state / k
             + self.cfg.term_loss_weight * total_term / k
             + klift * total_lift / k
             + krec * total_rec / k
+            + kcons * total_cons / k
             + kstab * total_stab / k
         )
         metrics.update(
@@ -249,6 +280,7 @@ class WorldModel(nn.Module):
             term_bce=(total_term / k).detach(),
             lift_loss=(total_lift / k).detach(),
             rec_loss=(total_rec / k).detach(),
+            cons_loss=(total_cons / k).detach(),
             stab_loss=(total_stab / k).detach(),
             consistency=(cons_num / k).detach(),
             nse_1step=err_first.detach(),
@@ -311,8 +343,13 @@ class WorldModel(nn.Module):
         groups: list[torch.Tensor] = []
         invalid: list[torch.Tensor] = []
         z_norm: list[torch.Tensor] = []
-        cons_abs: list[torch.Tensor] = []
+        cons_abs: list[torch.Tensor] = []  # legacy alias for cons_mse
+        cons_mse: list[torch.Tensor] = []
+        cons_l2: list[torch.Tensor] = []
         cons_rel: list[torch.Tensor] = []
+        phi_cons_mse: list[torch.Tensor] = []
+        phi_cons_l2: list[torch.Tensor] = []
+        phi_cons_rel: list[torch.Tensor] = []
         latent_var: list[torch.Tensor] = []
         latent_erank: list[torch.Tensor] = []
         sigma_max_M: list[torch.Tensor] = []
@@ -341,9 +378,19 @@ class WorldModel(nn.Module):
                 invalid.append((~torch.isfinite(s_next).all(-1)).sum())
 
                 z_norm.append(z_next.norm(dim=-1).mean())
-                cons = (z_next - z_re).pow(2).mean(-1)  # (n,)
-                cons_abs.append(cons.mean())
-                cons_rel.append((cons.sqrt() / (z_next.norm(dim=-1) + 1e-8)).mean())
+                cons = consistency_metrics(z_next, z_re, phi_dim=71 if state_in_latent else None)
+                cons_abs.append(cons["mse"].mean())  # legacy name, actually MSE
+                cons_mse.append(cons["mse"].mean())
+                cons_l2.append(cons["l2"].mean())
+                cons_rel.append(cons["rel"].mean())
+                if state_in_latent:
+                    phi_cons_mse.append(cons["phi_mse"].mean())
+                    phi_cons_l2.append(cons["phi_l2"].mean())
+                    phi_cons_rel.append(cons["phi_rel"].mean())
+                else:
+                    phi_cons_mse.append(torch.full((), float("nan"), device=s.device))
+                    phi_cons_l2.append(torch.full((), float("nan"), device=s.device))
+                    phi_cons_rel.append(torch.full((), float("nan"), device=s.device))
 
                 zc = z_next - z_next.mean(0, keepdim=True)
                 latent_var.append(zc.pow(2).mean(0).mean())
@@ -382,8 +429,13 @@ class WorldModel(nn.Module):
             "nse_groups": torch.stack(groups),
             "invalid": torch.stack(invalid),
             "z_norm": torch.stack(z_norm) if z_norm else nan,
-            "cons_abs": torch.stack(cons_abs) if cons_abs else nan,
+            "cons_abs": torch.stack(cons_abs) if cons_abs else nan,  # legacy MSE alias
+            "cons_mse": torch.stack(cons_mse) if cons_mse else nan,
+            "cons_l2": torch.stack(cons_l2) if cons_l2 else nan,
             "cons_rel": torch.stack(cons_rel) if cons_rel else nan,
+            "phi_cons_mse": torch.stack(phi_cons_mse) if phi_cons_mse else nan,
+            "phi_cons_l2": torch.stack(phi_cons_l2) if phi_cons_l2 else nan,
+            "phi_cons_rel": torch.stack(phi_cons_rel) if phi_cons_rel else nan,
             "latent_var": torch.stack(latent_var) if latent_var else nan,
             "latent_erank": torch.stack(latent_erank) if latent_erank else nan,
             "sigma_max_M": torch.stack(sigma_max_M) if sigma_max_M else nan,

@@ -223,6 +223,60 @@ def test_state_augmented_koopman_shapes_and_zero_init():
     assert d.shape == (4, 70)
 
 
+def test_state_augmented_lowrank_gradients():
+    """One factor random, one zero: the zero factor must get gradient first."""
+    from supermimic.world_model.koopman import KoopmanCfg, StateAugmentedKoopman
+
+    torch.manual_seed(0)
+    cfg = KoopmanCfg(
+        dz=8,
+        rank=2,
+        rank_domain=2,
+        rank_action_domain=2,
+        state_in_latent=True,
+        enc_hidden=(8, 8),
+        dec_hidden=(8, 8),
+    )
+    m = StateAugmentedKoopman(cfg)
+    z = torch.randn(8, 79)
+    a = torch.randn(8, 29)
+    xi = torch.randn(8, 33)
+    target = torch.randn(8, 79)
+    loss = (m.advance(z, a, xi) * target).sum()
+    loss.backward()
+    assert m.V.grad is not None and m.V.grad.norm().item() > 0
+    assert m.Q.grad is not None and m.Q.grad.norm().item() > 0
+    assert m.Ws.grad is not None and m.Ws.grad.norm().item() > 0
+    assert m.U.grad is not None and m.U.grad.norm().item() == 0
+    assert m.P.grad is not None and m.P.grad.norm().item() == 0
+    assert m.Wr.grad is not None and m.Wr.grad.norm().item() == 0
+
+    opt = torch.optim.SGD(m.parameters(), lr=1e-2)
+    opt.step()
+    opt.zero_grad()
+    loss = (m.advance(z, a, xi) * target).sum()
+    loss.backward()
+    assert m.U.grad is not None and m.U.grad.norm().item() > 0
+    assert m.P.grad is not None and m.P.grad.norm().item() > 0
+    assert m.Wr.grad is not None and m.Wr.grad.norm().item() > 0
+
+
+def test_consistency_metrics_l2_definition():
+    from supermimic.world_model.world_model import consistency_metrics
+
+    z = torch.tensor([[3.0, 4.0]])
+    out = consistency_metrics(z, torch.zeros_like(z))
+    torch.testing.assert_close(out["l2"], torch.tensor([5.0]))
+    torch.testing.assert_close(out["mse"], torch.tensor([12.5]))
+    torch.testing.assert_close(out["rel"], torch.tensor([1.0]))
+
+    z4 = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
+    out4 = consistency_metrics(z4, torch.zeros_like(z4), phi_dim=2)
+    torch.testing.assert_close(out4["phi_l2"], torch.tensor([5.0]))
+    torch.testing.assert_close(out4["phi_mse"], torch.tensor([12.5]))
+    torch.testing.assert_close(out4["phi_rel"], torch.tensor([1.0]))
+
+
 def test_state_augmented_world_model_g0b_and_loss():
     from supermimic.world_model.world_model import WorldModel, WorldModelCfg
 

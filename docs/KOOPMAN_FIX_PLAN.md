@@ -698,6 +698,9 @@ z_{t+1}=[\mathrm{canonical}(s_{t+1});u_{t+1}[71:]]
   consistency 显式改成窗口内每步的 \(\|z_{j+1}-E(s_{j+1},\xi)\|^2\)；
 - 快速入口：`run_state_koopman_quick.sh`；在线入口：`STATE_KOOPMAN=1
   run_lafan1_online.sh`。
+- **2026-10-31 P0 修复**：低秩因子改为“一方随机、一方为零”，避免 \(U=V=0\)
+  双零梯度；`cons_rel` 改为 L2/L2，新增 `cons_mse`/`cons_l2`/`phi_cons_*`；
+  `lambda_cons` 已加入 P2-A consistency loss，state-augmented 只监督 \(\phi\)。
 
 ---
 

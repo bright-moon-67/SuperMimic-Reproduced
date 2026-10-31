@@ -34,6 +34,8 @@
 > 支持 domain-state、action-state、action-domain 低秩耦合；稳定性约束作用于
 > \(M(a,\xi)=A+\sum a_i U_iV_i^\top+\sum_j\xi_jP_jQ_j^\top\)。
 > 快速对照：`bash experiment/koopman-world-model/run_state_koopman_quick.sh`。
+> 低秩因子采用“一方随机、一方为零”初始化，避免双零梯度；`cons_rel` 已改为
+> L2/L2，并增加 `phi_cons_*` 指标；`lambda_cons` 打开 P2-A consistency loss。
 
 > **2026-10-31 P0 更新**：推荐先冻结数据，再做 MLP/Koopman 对照。旧命令（每次 run 重新采集）
 > 只用于冒烟，不是 held-out 协议。

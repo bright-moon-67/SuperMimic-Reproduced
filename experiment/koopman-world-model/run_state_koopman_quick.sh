@@ -29,6 +29,8 @@ UPDATES=${UPDATES:-2000}
 EVAL_INTERVAL=${EVAL_INTERVAL:-500}
 BATCH_SIZE=${BATCH_SIZE:-4096}
 BATCHES_PER_UPDATE=${BATCHES_PER_UPDATE:-1}
+N_SIGMA=${N_SIGMA:-16}
+LAMBDA_CONS=${LAMBDA_CONS:-0.1}
 STAB=${STAB:-1}
 WITH_LARGE=${WITH_LARGE:-1}
 
@@ -63,7 +65,7 @@ run() {
 }
 
 pids=()
-COMMON=(--protocol a --data-in "$DATA" --batch-size "$BATCH_SIZE" --batches-per-update "$BATCHES_PER_UPDATE" --updates "$UPDATES" --eval-interval "$EVAL_INTERVAL" --compile default --koopman-state-in-latent --koopman-rank-domain 8 --koopman-rank-action-domain 4)
+COMMON=(--protocol a --data-in "$DATA" --batch-size "$BATCH_SIZE" --batches-per-update "$BATCHES_PER_UPDATE" --updates "$UPDATES" --eval-interval "$EVAL_INTERVAL" --n-sigma "$N_SIGMA" --lambda-cons "$LAMBDA_CONS" --compile default --koopman-state-in-latent --koopman-rank-domain 8 --koopman-rank-action-domain 4)
 
 run state_koopman --wm-type koopman "${COMMON[@]}" --eval-modes latent,reencode \
     --dz 128 --rank 8 --koopman-enc-hidden 256 256 --koopman-dec-hidden 256 256 \

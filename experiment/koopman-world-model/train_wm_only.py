@@ -118,6 +118,7 @@ def main(
     koopman_mode: str = "latent",
     lambda_lift: float | None = None,  # None = KoopmanCfg default
     lambda_rec: float | None = None,  # None = KoopmanCfg default
+    lambda_cons: float | None = None,  # P2-A: latent consistency loss
     a_rho_target: float | None = None,  # P2-B: spectral-normalise the A init
     stab_mode: str = "none",  # P2-B: none | frobenius | power
     lambda_stab: float = 0.0,  # P2-B: weight of the stability term
@@ -135,6 +136,7 @@ def main(
     eval_windows_32: Path | None = None,
     eval_modes: str = "latent,reencode",
     n_eval_windows: int = 1024,
+    n_sigma: int = 64,
     save_wm: Path | None = None,
     replay_capacity: int = 1000,
     out: Path = Path("experiment/koopman-world-model/wm_only_result.json"),
@@ -216,6 +218,8 @@ def main(
                 wm_cfg.koopman.lambda_lift = lambda_lift
             if lambda_rec is not None:
                 wm_cfg.koopman.lambda_rec = lambda_rec
+            if lambda_cons is not None:
+                wm_cfg.koopman.lambda_cons = lambda_cons
             wm_cfg.koopman.a_rho_target = a_rho_target
             wm_cfg.koopman.stab_mode = stab_mode
             wm_cfg.koopman.lambda_stab = lambda_stab
@@ -291,7 +295,12 @@ def main(
                 "E8": _f(nse[7]) if len(nse) >= 8 else None,
                 "E32": _f(nse[31]) if len(nse) >= 32 else None,
                 "cons_abs": _f(diag["cons_abs"].mean()),
+                "cons_mse": _f(diag["cons_mse"].mean()),
+                "cons_l2": _f(diag["cons_l2"].mean()),
                 "cons_rel": _f(diag["cons_rel"].mean()),
+                "phi_cons_mse": _f(diag["phi_cons_mse"].mean()),
+                "phi_cons_l2": _f(diag["phi_cons_l2"].mean()),
+                "phi_cons_rel": _f(diag["phi_cons_rel"].mean()),
                 "z_norm": _f(diag["z_norm"].mean()),
                 "latent_var": _f(diag["latent_var"].mean()),
                 "latent_erank": _f(diag["latent_erank"].mean()),
@@ -313,7 +322,9 @@ def main(
                 evals = []
                 for name, w in eval_sets.items():
                     for mode in modes:
-                        diag = wm.rollout_diagnostics(w.states, w.a_exec, w.xi, mode=mode)
+                        diag = wm.rollout_diagnostics(
+                            w.states, w.a_exec, w.xi, mode=mode, n_sigma=n_sigma
+                        )
                         row = eval_row(i + 1, name, mode, diag)
                         evals.append(row)
                         print(
@@ -337,6 +348,8 @@ def main(
             "koopman_state_in_latent": koopman_state_in_latent,
             "koopman_rank_domain": koopman_rank_domain,
             "koopman_rank_action_domain": koopman_rank_action_domain,
+            "lambda_cons": lambda_cons,
+            "n_sigma": n_sigma,
             "wm_lr": wm_lr,
             "grad_clip": grad_clip,
             "weight_decay": weight_decay,

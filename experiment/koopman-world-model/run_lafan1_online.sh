@@ -59,6 +59,7 @@ if [ "$STATE_KOOPMAN" = "1" ]; then
         --world-model.koopman.state-in-latent
         --world-model.koopman.rank-domain 8
         --world-model.koopman.rank-action-domain 4
+        --world-model.koopman.lambda-cons "${LAMBDA_CONS:-0.1}"
     )
 fi
 
