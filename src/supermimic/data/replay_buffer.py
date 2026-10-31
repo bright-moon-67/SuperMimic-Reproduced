@@ -24,6 +24,8 @@ class WindowBatch:
     reward: torch.Tensor  # (k, n)
     done: torch.Tensor  # (k, n) termination label of states 1..k
     frame: torch.Tensor  # (k, n) target frame of each transition
+    clip: torch.Tensor | None = None  # (n,) clip id of the window start
+    ep_id: torch.Tensor | None = None  # (n,) episode id of the window start
 
 
 @dataclass
@@ -41,7 +43,7 @@ class ReplayBuffer:
         self.E, self.T = num_envs, capacity
         self.device = torch.device(device)
         E, T = num_envs, capacity
-        f = lambda *shape: torch.zeros(E, T, *shape, device=self.device)  # noqa: E731
+        f = lambda *shape: torch.zeros(E, T, *shape, device=self.device)
         self.s = f(state_dim)
         self.a = f(act_dim)
         self.a_exec = f(act_dim)
@@ -87,6 +89,45 @@ class ReplayBuffer:
     def size(self) -> int:
         return int(self.valid.sum().item())
 
+    # ------------------------------------------------------------------ snapshots
+
+    _SNAPSHOT_FIELDS = (
+        "s", "a", "a_exec", "xi", "r", "done", "frame", "clip", "ep_id",
+        "terminal", "ep_start", "valid", "ptr", "ep_counter",
+    )
+
+    @torch.no_grad()
+    def snapshot(self) -> dict:
+        """Detached CPU copy of the buffer + ring bookkeeping (torch.save-friendly).
+
+        ``from_snapshot`` reconstructs a buffer that supports the same
+        ``sample_windows`` / ``sample_starts`` calls, so frozen datasets do not
+        need to re-run the simulator.
+        """
+        return {
+            "E": int(self.E),
+            "T": int(self.T),
+            "device": str(self.device),
+            "total_rows": int(self.total_rows),
+            **{name: getattr(self, name).detach().cpu() for name in self._SNAPSHOT_FIELDS},
+        }
+
+    @classmethod
+    def from_snapshot(cls, snap: dict, device: str | torch.device | None = None) -> ReplayBuffer:
+        dev = device if device is not None else snap.get("device", "cpu")
+        buf = cls(
+            int(snap["E"]),
+            int(snap["T"]),
+            int(snap["s"].shape[-1]),
+            int(snap["a"].shape[-1]),
+            int(snap["xi"].shape[-1]),
+            dev,
+        )
+        for name in cls._SNAPSHOT_FIELDS:
+            setattr(buf, name, snap[name].to(buf.device))
+        buf.total_rows = int(snap.get("total_rows", 0))
+        return buf
+
     # ------------------------------------------------------------------ sampling helpers
 
     def _rolled(self, x: torch.Tensor, j: int) -> torch.Tensor:
@@ -112,17 +153,27 @@ class ReplayBuffer:
         return ok
 
     @torch.no_grad()
-    def _sample_from_mask(self, mask: torch.Tensor, n: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def _sample_from_mask(self, mask: torch.Tensor, n: int, generator: torch.Generator | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         flat = mask.reshape(-1)
         total = int(flat.sum().item())
         if total == 0:
             raise RuntimeError("replay buffer has no sampleable rows yet")
-        idx = torch.multinomial(flat.float(), n, replacement=True)
+        idx = torch.multinomial(flat.float(), n, replacement=True, generator=generator)
         return idx // self.T, idx % self.T
 
     @torch.no_grad()
-    def sample_windows(self, n: int, k: int) -> WindowBatch:
-        e, t = self._sample_from_mask(self.window_mask(k), n)
+    def sample_windows(self, n: int, k: int, mask: torch.Tensor | None = None, generator: torch.Generator | None = None) -> WindowBatch:
+        """Sample k-step windows; optional ``mask`` (E,T) restricts the eligible starts.
+
+        ``generator`` must live on the same device as the buffer (CUDA generator
+        for a CUDA buffer); it makes evaluation windows reproducible.
+        """
+        m = self.window_mask(k)
+        if mask is not None:
+            if mask.shape != m.shape:
+                raise ValueError(f"mask shape {tuple(mask.shape)} != buffer shape {tuple(m.shape)}")
+            m = m & mask
+        e, t = self._sample_from_mask(m, n, generator=generator)
         offs = torch.arange(k + 1, device=self.device)
         tt = (t[None, :] + offs[:, None]) % self.T  # (k+1, n)
         ee = e[None, :].expand(k + 1, n)
@@ -134,15 +185,17 @@ class ReplayBuffer:
             reward=self.r[ee[:-1], tt[:-1]],
             done=self.done[ee[1:], tt[1:]],
             frame=self.frame[ee[:-1], tt[:-1]],
+            clip=self.clip[e, t],
+            ep_id=self.ep_id[e, t],
         )
 
     @torch.no_grad()
-    def sample_starts(self, n: int, hist: int) -> StartBatch:
+    def sample_starts(self, n: int, hist: int, generator: torch.Generator | None = None) -> StartBatch:
         mask = self.valid & ~self.terminal
         t_idx = torch.arange(self.T, device=self.device)[None, :]
         dist_to_ptr = (self.ptr[:, None] - t_idx - 1) % self.T
         mask &= dist_to_ptr < self.T - hist - 1  # keep history rows from being overwritten underneath
-        e, t = self._sample_from_mask(mask, n)
+        e, t = self._sample_from_mask(mask, n, generator=generator)
         offs = torch.arange(hist, device=self.device) - (hist - 1)  # -(hist-1) .. 0
         tt = (t[None, :] + offs[:, None]) % self.T  # (hist, n)
         ee = e[None, :].expand(hist, n)

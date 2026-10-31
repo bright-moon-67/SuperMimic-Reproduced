@@ -2,6 +2,65 @@
 
 基线资产：`logs/baseline_mlp_backup/ckpt_latest.pt`（MLP baseline checkpoint + 配置 + eval 结果）。
 
+> **2026-10-31 参数对齐（重要）**：容量并行实验 c1–c4 已全部停止，不作为结果。
+> 后续正式对照统一用 `run_paper_aligned.sh`，对齐 `origin/main` 的 `lafan1_a800`：
+> LAFAN1 **40 条 clip**、预训练策略采样、`return` 采样、8192 envs、
+> WM batch **4096 × 10 batches/update**、MLP hidden **2048³**、lr 2e-4、window 8、
+> `compile=default`，以及 320k env steps × 0.4 UTD = **128k WM updates**。
+> `run_p2b_sweep.sh` / `run_capacity_parallel.sh` 保留为显式 legacy 诊断
+> （batch 2048、1 batch/update、`compile=none`），不是原仓库参数。
+>
+> ```bash
+> # 完整对齐（默认 128k WM updates，耗时很长；先确认预算）
+> bash experiment/koopman-world-model/run_paper_aligned.sh
+>
+> # 快速冒烟/诊断：只改 update 预算，其余参数仍按原仓库
+> UPDATES=3000 EVAL_INTERVAL=500 bash experiment/koopman-world-model/run_paper_aligned.sh
+> ```
+>
+> **在线 vs 离线**：上面 `run_paper_aligned.sh` 是**冻结 replay 快照的离线 WM 诊断**，
+> 不能复现源仓库“策略持续产生新数据、WM 与 policy 共同适应”的分布。若要严格对齐
+> 源仓库的 LAFAN1 实验，用 `run_lafan1_online.sh`（`sm-train`，8192 envs，
+> 40 clips，320k iterations，UTD 0.4）；离线结果只用于快速筛选结构和损失。
+>
+> **增广状态 \([z;\xi]\)**：设置 `XI_STATE=1` 可打开 `koopman.use_xi_state`。
+> 新增 `A_xi`、`V_xi`，零初始化；`z_{t+1}` 每步接收归一化 \(\xi\)，但 \(\xi\) 块保持
+> 恒等，P2-B 的谱约束仍只作用于 \(z\) 块（`M_z(a)`），不作用于含 \(\xi\) 的增广矩阵。
+>
+> **状态增广 Koopman**：`STATE_KOOPMAN=1` 打开 `koopman.state_in_latent`；
+> \(z=[\mathrm{canonical}(s);\phi(s,\xi)]\)，dynamics 输出
+> \(u=(A z+\dots)\)，线性 decoder 把 \(u[:71]\) 映射为 70 维 delta，
+> 再用 `StateSpec.integrate` 得到 \(s_{t+1}\)，rollout 不重新编码。
+> 支持 domain-state、action-state、action-domain 低秩耦合；稳定性约束作用于
+> \(M(a,\xi)=A+\sum a_i U_iV_i^\top+\sum_j\xi_jP_jQ_j^\top\)。
+> 快速对照：`bash experiment/koopman-world-model/run_state_koopman_quick.sh`。
+
+> **2026-10-31 P0 更新**：推荐先冻结数据，再做 MLP/Koopman 对照。旧命令（每次 run 重新采集）
+> 只用于冒烟，不是 held-out 协议。
+>
+> ```bash
+> # 1) 冻结数据 + A/B 评估窗口（一次）
+> .venv/bin/python experiment/koopman-world-model/collect_wm_data.py \
+>     --out /root/autodl-tmp/data/wm/lafan1.pt
+>
+> # 2) 同一份数据训练，保存权重
+> .venv/bin/python experiment/koopman-world-model/train_wm_only.py \
+>     --wm-type koopman --protocol a \
+>     --data-in /root/autodl-tmp/data/wm/lafan1.pt \
+>     --eval-modes latent,reencode \
+>     --save-wm /root/autodl-tmp/logs/wm/k0r_latent.pt \
+>     --out experiment/koopman-world-model/wm_k0r_latent.json
+>
+> # 3) 同权重诊断
+> .venv/bin/python scripts/diag_koopman.py \
+>     --wm-state /root/autodl-tmp/logs/wm/k0r_latent.pt \
+>     --eval-windows-a8 /root/autodl-tmp/data/wm/eval_a_k8.pt \
+>     --eval-windows-a32 /root/autodl-tmp/data/wm/eval_a_k32.pt \
+>     --out experiment/koopman-world-model/diag_p1.json
+> ```
+>
+> 详细阶段与门禁见 `docs/KOOPMAN_FIX_PLAN.md`。
+
 ## 实验 1：独立 WM 训练（阶段 B）——同一批真实转移对照 MLP vs Koopman
 
 ```bash
