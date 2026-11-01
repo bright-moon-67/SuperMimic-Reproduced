@@ -101,5 +101,17 @@ ratio1：
 1. ratio2 目前在线 WM 指标和 return 都优于 ratio1；
 2. ratio2 的计算成本约为 ratio1 的 2 倍，速度约 0.6 vs 0.9 it/s；
 3. 两个 Koopman run 都仍明显落后于已有 MLP 长实验；
-4. 当前没有 4000 iteration checkpoint；第一个正式 checkpoint 预计在约
-   2500/4000 → 还需要一段时间。
+4. ratio1 已到 4000 iteration 并保存 `ckpt_0004000.pt`；ratio2 还在向 4000 前进。
+
+## 后续更新（2026-11-01 11:05 CST）
+
+| run | iteration | train_nse1 | eval_nse1 | eval_nse8 | eval_nse32 | imag_ret | surv | train_ret | wm_gn | pi_gn |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| ratio2 | 2900 | 0.0510 | 0.0434 | 0.1425 | 0.828 | 1.723 | 0.976 | 0.343 | 22.3 | 0.065 |
+| ratio1 | 4000 | 0.0631 | 0.0497 | 0.1627 | 0.913 | 1.624 | 0.971 | 0.266 | 27.9 | 0.066 |
+
+- ratio2 的 `train_ret` 最近 8 个点平均约 **0.337**，在 0.32–0.35 平台波动；
+- ratio1 的 `train_ret` 最近 8 个点平均约 **0.279**，也在平台期；
+- ratio2 的 `eval_nse8` 已到 **0.1425**，明显低于 ratio1 的 0.1627；
+- 两者仍未追上 MLP；ratio1 已有 4000 checkpoint，ratio2 暂无 4000 checkpoint。
+
