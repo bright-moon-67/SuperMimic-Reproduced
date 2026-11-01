@@ -1,5 +1,10 @@
 # 实验 1 结果：WM-only 对照（legacy 协议，各 3000 更新）
 
+> **共享固定评估与真实仿真配对（2026-11-01）**：见
+> [`RESULTS_SHARED_EVAL.md`](RESULTS_SHARED_EVAL.md)。ratio1 在线 NSE 改善，
+> 但在同一固定窗口和真实 benchmark 上均退化；ratio2 benchmark 更低，
+> 其在线优势不能作为策略改进证据。
+
 > **Koopman 在线 ratio 对照（2026-11-01）**：见
 > [`RESULTS_ONLINE_RATIO_2026-11-01.md`](RESULTS_ONLINE_RATIO_2026-11-01.md)。
 

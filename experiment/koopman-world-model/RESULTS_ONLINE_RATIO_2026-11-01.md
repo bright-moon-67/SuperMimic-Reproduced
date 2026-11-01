@@ -101,7 +101,11 @@ ratio1：
 1. ratio2 目前在线 WM 指标和 return 都优于 ratio1；
 2. ratio2 的计算成本约为 ratio1 的 2 倍，速度约 0.6 vs 0.9 it/s；
 3. 两个 Koopman run 都仍明显落后于已有 MLP 长实验；
-4. ratio1 已到 4000 iteration 并保存 `ckpt_0004000.pt`；ratio2 还在向 4000 前进。
+4. ratio1 已到 4000 iteration 并保存 `ckpt_0004000.pt`；ratio2 也已在 4000
+   保存 checkpoint；
+5. **plan9 复核后必须加限制**：以上结论只对“当前 replay 的在线指标”成立。
+   同一固定窗口和真实仿真 benchmark 上，gate > ratio1 > ratio2（见文末
+   “plan9 复核”），ratio2 的在线优势没有转化为真实策略优势。
 
 ## 后续更新（2026-11-01 11:05 CST）
 
@@ -113,5 +117,36 @@ ratio1：
 - ratio2 的 `train_ret` 最近 8 个点平均约 **0.337**，在 0.32–0.35 平台波动；
 - ratio1 的 `train_ret` 最近 8 个点平均约 **0.279**，也在平台期；
 - ratio2 的 `eval_nse8` 已到 **0.1425**，明显低于 ratio1 的 0.1627；
-- 两者仍未追上 MLP；ratio1 已有 4000 checkpoint，ratio2 暂无 4000 checkpoint。
+- 两者仍未追上 MLP；ratio1 已有 4000 checkpoint；ratio2 在 4000 也生成了
+  checkpoint（见下方 plan9 复核，在线指标不能代表真实策略）。
+
+## plan9 复核：共享固定窗口与真实仿真
+
+上面的 `eval_nse_*` 是每个 run 从自己的 replay 采样，不是同一测试集。
+plan9 改为在固定 `eval_a_k32.pt` 上评估所有 checkpoint：
+
+| checkpoint | iteration | E1 | E8 | E16 | E32 |
+|---|---:|---:|---:|---:|---:|
+| gate | 1000 | 0.05416 | 0.24581 | 0.52513 | 1.37678 |
+| ratio1 | 4000 | 0.05840 | 0.30255 | 0.87842 | 4.33377 |
+| ratio2 | 4000 | **0.05120** | 0.25347 | 0.89637 | 8.75806 |
+
+同时用 `scripts/eval_benchmark.py`（40 clips、确定性、无噪声/DR、seed 0）
+做真实仿真配对评估：
+
+| checkpoint | iteration | 日志 train_ret | mean norm return | step-weighted | 平均步数 | failed |
+|---|---:|---:|---:|---:|---:|---:|
+| gate | 1000 | 0.335 | **0.6029** | **0.5837** | 907 | 40/40 |
+| ratio1 | 4000 | 0.266 | 0.5016 | 0.5119 | 1907 | 40/40 |
+| ratio2 | 4000 | 0.351 | 0.4892 | 0.4805 | 4491 | 37/40 |
+
+- 共享窗口上 ratio2 的 E1/E8 最好，但 E32 最差；在线 `eval_nse32` 的改善
+  不能推广到固定数据。
+- 真实 benchmark 上 gate > ratio1 > ratio2，和在线 `train_ret`/NSE 的顺序
+  相反。ratio2 平均存活 4491 步且 3/40 跑完，但
+  `motion_global_root_pos` 只有 0.00016（gate 为 0.00308）：策略学会了
+  局部身体跟踪和存活，却丢失了全局根节点轨迹。
+- 因此 ratio 结论必须改为：“ratio2 在当前 replay 的短时域拟合上更好，
+  但没有带来真实 benchmark 提升；在线指标不能作为策略改进证据。”
+  下一步应优先修全局 root 奖励/终止与真实 benchmark，而不是继续提高 ratio。
 
