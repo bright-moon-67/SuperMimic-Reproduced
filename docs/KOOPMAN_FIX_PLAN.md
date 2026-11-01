@@ -899,3 +899,25 @@ v1 把 `∂s_H/∂a_0` 当作“策略梯度方向”，这是错的：前者是
 - `latent_var`、`latent_erank`；
 - 六组通道 NSE、NaN/Inf 计数；
 - 权重文件 + 加载所需的迁移信息。
+
+---
+
+## 14. plan5 修复记录（2026-10-31）
+
+本轮针对 `reference/plan5.md` 的 P0/P1 问题落地，不改变原始 Koopman 基线默认行为：
+
+| 问题 | 修复 | 开关/默认 |
+|---|---|---|
+| `L_cons` 目标未 detach，梯度会穿过目标编码器 | `cons_target_detach` | `--cons-target-detach`，默认 False |
+| state-augmented `rec_loss` 恒为 0（直接返回显式 state block） | 新增 `recon` 头，只从 `phi` 重建 canonical state | `reconstruct(z)=recon(z[...,71:])` |
+| `lift_loss` 对 state/phi 使用同一权重，phi 被物理块梯度淹没 | `lambda_lift_phys` / `lambda_lift_phi` 分块 | None 时回退 `lambda_lift` |
+| `lift_loss` 被乘了两次 | loss 改为 `+ total_lift/k`，`total_lift` 内已含权重 | 经典路径数值不变 |
+| resume 无法区分“续训/迁移策略/只恢复 WM” | `resume_mode=full/transfer_policy/wm_only` | 默认 full |
+| 评估 val/test 混在 a/b | 新增 `val_*` / `test_a_*` / `test_b_*` 冻结集 | 保留 a/b 兼容 |
+| 只看 `sigma_max(M)`，看不到闭环放大 | `diag_koopman.py` 增加 `closed_loop_fd_1step/all` | 自动输出 |
+
+验证：
+
+- `pytest -q tests/test_koopman.py tests/test_wm_protocol.py`：24 passed；
+- 20-update smoke：`rec_loss` 从 0 变为 0.206/0.191，`lift_phys`/`lift_phi` 均输出；
+- 状态增广 2000-update quick run 启动：`/root/autodl-tmp/logs/wm_plan5/`。

@@ -1,5 +1,9 @@
 # 实验 1 结果：WM-only 对照（legacy 协议，各 3000 更新）
 
+> **在线长训结果（2026-11-01）**：见
+> [`RESULTS_ONLINE_2026-11-01.md`](RESULTS_ONLINE_2026-11-01.md)。MLP 在线训练
+> 明显优于当前 state-augmented Koopman。
+
 > **2026-10-31 中止记录**：c1–c4 并行容量实验已全部停止，没有可报告的完整结果；
 > 不要把这些 run 与下表或 K0r/λ=10 直接比较。后续统一按 `run_paper_aligned.sh`
 > （LAFAN1 40 clips、8192 envs、batch 4096×10、MLP 2048³）重跑。

@@ -9,7 +9,7 @@ import torch
 from supermimic.data.replay_buffer import ReplayBuffer
 from supermimic.envs.mdp.motion_library import MotionLibrary
 from supermimic.imagination.objective import gae_targets, policy_objective
-from supermimic.imagination.rollout import ImagRollout, imagine
+from supermimic.imagination.rollout import ImagRollout, _check_finite, imagine
 from supermimic.policy.nets import Critic, Policy
 from supermimic.training.distributed import allreduce_grads
 from supermimic.world_model.world_model import WorldModel
@@ -66,19 +66,30 @@ class PolicyTrainer:
         self.wm.requires_grad_(False)
         self.critic.requires_grad_(False)
         ro = imagine(self.wm, self.policy, self.lib, start, cfg.horizon, cfg.future_frames, obs_noise=cfg.obs_noise, step_fn=self.step_fn, anchor_obs=cfg.anchor_obs)
+        _check_finite("rollout.states", ro.states)
+        _check_finite("rollout.actions", ro.actions)
+        _check_finite("rollout.rewards", ro.rewards)
         feat, goals, e_root = self._critic_inputs(ro)
+        _check_finite("critic_feat", feat)
         if cfg.use_critic:
             v_H = self.critic(feat[-1], goals[-1], xi_norm, e_root[-1])
         else:
             v_H = None
         J = policy_objective(ro, v_H, cfg.gamma)
         loss = -J / cfg.horizon
+        _check_finite("policy_objective", J.detach())
+        _check_finite("policy_loss", loss.detach())
         self.opt.zero_grad(set_to_none=True)
         loss.backward()
         allreduce_grads(self.policy)
+        for name, p in self.policy.named_parameters():
+            _check_finite(f"policy_grad/{name}", p.grad if p.grad is not None else p)
         gn = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), cfg.grad_clip_norm)
+        _check_finite("policy_grad_norm", gn.detach())
         torch.nn.utils.clip_grad_value_(self.policy.parameters(), cfg.grad_clip_value)
         self.opt.step()
+        for name, p in self.policy.named_parameters():
+            _check_finite(f"policy_param/{name}", p.detach())
         self.wm.requires_grad_(True)
         self.critic.requires_grad_(True)
 

@@ -165,8 +165,17 @@ def main(
 
         eval_sets: dict[str, dict] = {}
         for horizon in eval_horizons:
-            for name, clips in (("a", (*val_clips, *test_a_clips)), ("b", (*val_clips, *test_b_clips))):
-                w = sample(n_eval_windows, horizon, clips, eval_seed + 17 * horizon + (0 if name == "a" else 1))
+            # Keep a/b as combined compatibility sets, but also save clean splits:
+            # val is for model selection; test_a/test_b are final held-out sets.
+            split_sets = (
+                ("val", val_clips),
+                ("test_a", test_a_clips),
+                ("test_b", test_b_clips),
+                ("a", (*val_clips, *test_a_clips)),
+                ("b", (*val_clips, *test_b_clips)),
+            )
+            for offset, (name, clips) in enumerate(split_sets):
+                w = sample(n_eval_windows, horizon, clips, eval_seed + 17 * horizon + offset)
                 eval_sets[f"{name}_{horizon}"] = _to_cpu(w)
 
         train_sample = None

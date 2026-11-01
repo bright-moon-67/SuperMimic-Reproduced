@@ -24,12 +24,18 @@
 #   STAB=0                     # disable P2-B (pure original Koopman)
 #   XI_STATE=1                 # augment latent state with xi: z~=[z, xi]
 #   STATE_KOOPMAN=1            # z=[canonical(s); phi(s,xi)], delta+integrate
-#   RESUME=/path/ckpt.pt       # reuse policy/critic, train a fresh Koopman WM
+#   RESUME=/path/ckpt.pt       # checkpoint to resume
+#   RESUME_MODE=transfer_policy # load policy/critic only, fresh WM
+#   RESUME_MODE=full            # restore weights + optimizers + iteration
+#   RESUME_MODE=wm_only         # restore WM only
+#   RESUME_SKIP=wm              # optional explicit skip (experiment B)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 DATA=${DATA:-/root/autodl-tmp/data/npz/lafan1}
 RUN_NAME=${RUN_NAME:-lafan1_koopman_aligned}
+WM_TYPE=${WM_TYPE:-koopman}
+MLP_HIDDEN=${MLP_HIDDEN:-"2048 2048 2048"}
 LOG_ROOT=${LOG_ROOT:-/root/autodl-tmp/logs}
 NUM_ENVS=${NUM_ENVS:-8192}
 TOTAL_ITERATIONS=${TOTAL_ITERATIONS:-320000}
@@ -38,6 +44,8 @@ STAB=${STAB:-1}
 XI_STATE=${XI_STATE:-0}
 STATE_KOOPMAN=${STATE_KOOPMAN:-0}
 RESUME=${RESUME:-}
+RESUME_MODE=${RESUME_MODE:-full}
+RESUME_SKIP=${RESUME_SKIP:-}
 
 STAB_ARGS=()
 if [ "$STAB" = "1" ]; then
@@ -60,6 +68,25 @@ if [ "$STATE_KOOPMAN" = "1" ]; then
         --world-model.koopman.rank-domain 8
         --world-model.koopman.rank-action-domain 4
         --world-model.koopman.lambda-cons "${LAMBDA_CONS:-0.1}"
+        --world-model.koopman.cons-target-detach
+        --world-model.koopman.lambda-lift-phys "${LAMBDA_LIFT_PHYS:-0.0}"
+        --world-model.koopman.lambda-lift-phi "${LAMBDA_LIFT_PHI:-0.1}"
+    )
+fi
+
+if [ "$WM_TYPE" = "mlp" ]; then
+    WM_ARGS=(
+        --world-model.type mlp
+        --world-model.hidden $MLP_HIDDEN
+    )
+else
+    WM_ARGS=(
+        --world-model.type koopman
+        --world-model.koopman-mode latent
+        --world-model.koopman.dz 128
+        --world-model.koopman.rank 8
+        --world-model.koopman.enc-hidden 256 256
+        --world-model.koopman.dec-hidden 256 256
     )
 fi
 
@@ -70,7 +97,10 @@ fi
 
 RESUME_ARGS=()
 if [ -n "$RESUME" ]; then
-    RESUME_ARGS=(--resume "$RESUME" --resume-skip wm)
+    RESUME_ARGS=(--resume "$RESUME" --resume-mode "$RESUME_MODE")
+    if [ -n "$RESUME_SKIP" ]; then
+        RESUME_ARGS+=(--resume-skip "$RESUME_SKIP")
+    fi
 fi
 
 .venv/bin/sm-train \
@@ -90,13 +120,7 @@ fi
     --env.future-frames 10 \
     --env.no-compact-library \
     --env.no-anchor-obs \
-    --world-model.type koopman \
-    --world-model.koopman-mode latent \
-    --world-model.koopman.dz 128 \
-    --world-model.koopman.rank 8 \
-    --world-model.koopman.enc-hidden 256 256 \
-    --world-model.koopman.dec-hidden 256 256 \
-    "${STAB_ARGS[@]}" "${XI_ARGS[@]}" "${STATE_ARGS[@]}" \
+    "${WM_ARGS[@]}" "${STAB_ARGS[@]}" "${XI_ARGS[@]}" "${STATE_ARGS[@]}" \
     --wm-trainer.window 8 \
     --wm-trainer.batches-per-update 10 \
     --wm-trainer.batch-size 4096 \

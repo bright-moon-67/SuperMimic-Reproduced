@@ -48,6 +48,12 @@ class KoopmanCfg:
     # state-augmented Koopman this is applied to the phi block only, because the
     # canonical-state block is already tied to the integration path.
     lambda_cons: float = 0.0
+    # plan5 P0-1: stop gradient through the consistency target encoder.
+    cons_target_detach: bool = False
+    # plan5 P1: split lift_loss into physical and learned-latent blocks.
+    # None means "use lambda_lift for that block" (backward compatible).
+    lambda_lift_phys: float | None = None
+    lambda_lift_phi: float | None = None
     # A init: A = a_eye * I + a_noise * N(0, 1).
     a_eye: float = 0.99
     a_noise: float = 0.01
@@ -299,6 +305,9 @@ class StateAugmentedKoopman(nn.Module):
         self.encoder = MLP(
             feat_dim + xi_dim, tuple(self.cfg.enc_hidden), dz, last_gain=self.cfg.enc_last_gain
         )
+        # plan5 P0-2: reconstruct canonical state from the learned phi block, not
+        # from the explicit state block (which would make rec_loss identically 0).
+        self.recon = MLP(dz, tuple(self.cfg.dec_hidden), feat_dim)
         # Zero-init dynamics -> zero delta / constant-velocity prior at start.
         self.A = nn.Parameter(torch.zeros(D, D))
         self.B = nn.Parameter(torch.zeros(D, act_dim))
@@ -373,8 +382,12 @@ class StateAugmentedKoopman(nn.Module):
         return self.decoder(u[..., : self.feat_dim])
 
     def reconstruct(self, z: torch.Tensor) -> torch.Tensor:
-        """The state block is preserved explicitly, so reconstruction is exact."""
-        return z[..., : self.feat_dim]
+        """Reconstruct canonical state from phi (plan5 P0-2).
+
+        The explicit state block z[..., :feat_dim] is not used here: returning it
+        would make the reconstruction loss identically zero.
+        """
+        return self.recon(z[..., self.feat_dim :])
 
     # ------------------------------------------------------------------ diagnostics
 

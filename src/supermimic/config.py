@@ -64,6 +64,9 @@ class TrainConfig:
     policy_trainer: PolicyTrainerCfg = field(default_factory=PolicyTrainerCfg)
     schedule: ScheduleCfg = field(default_factory=ScheduleCfg)
     resume: Path | None = None
+    # full: restore weights + optimizers + iteration; transfer_policy: load Actor/Critic
+    # weights only and reset WM/optimizers/schedule; wm_only: restore WM + wm optimizer.
+    resume_mode: str = "full"
     # Comma-separated state-dict keys to skip on resume (e.g. "wm" to reuse a trained policy/critic
     # under a different world model). Supported: wm, policy, critic, wm_opt, policy_opt, critic_opt.
     resume_skip: str = ""

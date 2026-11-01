@@ -18,7 +18,12 @@ from supermimic.envs.tracking_env_cfg import ANCHOR_BODY, ROOT_BODY, TRACKED_BOD
 from supermimic.imagination.policy_trainer import PolicyTrainer
 from supermimic.kinematics.g1_fk import G1Kinematics
 from supermimic.policy.nets import Critic, Policy
-from supermimic.training.distributed import allreduce_mean, broadcast_params, finalize, init_distributed, world_size
+from supermimic.training.distributed import (
+    allreduce_mean,
+    broadcast_params,
+    finalize,
+    init_distributed,
+)
 from supermimic.training.schedule import cosine_lr
 from supermimic.world_model.heads import AnalyticHeads
 from supermimic.world_model.wm_trainer import WorldModelTrainer
@@ -87,7 +92,7 @@ class Trainer:
             broadcast_params(m)
         self.wm_trainer = WorldModelTrainer(self.wm, self.lib, cfg.wm_trainer)
         self.policy_trainer = PolicyTrainer(self.wm, self.policy, self.critic, self.lib, cfg.policy_trainer)
-        n_params = lambda m: sum(p.numel() for p in m.parameters())  # noqa: E731
+        n_params = lambda m: sum(p.numel() for p in m.parameters())
         if self.is_main:
             print(f"[INFO] params: world model {n_params(self.wm)/1e6:.2f}M, policy {n_params(self.policy)/1e6:.2f}M, critic {n_params(self.critic)/1e6:.3f}M")
 
@@ -100,7 +105,7 @@ class Trainer:
         self.num_updates = 0
         self._utd_acc = 0.0
         if cfg.resume is not None:
-            self.load(cfg.resume, skip=cfg.resume_skip)
+            self.load(cfg.resume, skip=cfg.resume_skip, mode=cfg.resume_mode)
 
     # ------------------------------------------------------------------ checkpoints
 
@@ -124,14 +129,36 @@ class Trainer:
             self.log_dir / name,
         )
 
-    def load(self, path: Path, skip: str | None = None) -> None:
-        """Load a checkpoint, optionally skipping keys listed in ``skip`` (comma-separated).
+    def load(self, path: Path, skip: str | None = None, mode: str = "full") -> None:
+        """Load a checkpoint with explicit resume semantics.
 
-        Used to continue a trained actor/critic under a different world model
-        (Koopman experiments B: ``--resume-skip wm``).
+        mode="full": restore all weights, optimizers and iteration counters.
+        mode="transfer_policy": restore Actor/Critic weights only; the new WM,
+        optimizers, sampler state and LR schedule start from scratch.
+        mode="wm_only": restore only the world model and its optimizer.
         """
         skip_keys = {k.strip() for k in (skip or "").split(",") if k.strip()}
         ck = torch.load(path, map_location=self.device, weights_only=False)
+        if mode == "transfer_policy":
+            self.policy.load_state_dict(ck["policy"])
+            self.critic.load_state_dict(ck["critic"])
+            self.iteration = 0
+            self.start_iteration = 0
+            self.num_updates = 0
+            self.command.bin_return.zero_()
+            self.command.bin_memory.zero_()
+            print(f"[INFO] transferred policy/critic from {path}; WM and schedule reset")
+            return
+        if mode == "wm_only":
+            self.wm.load_state_dict(ck["wm"])
+            self.wm_trainer.opt.load_state_dict(ck["wm_opt"])
+            self.iteration = ck["iteration"]
+            self.start_iteration = self.iteration
+            self.num_updates = ck["num_updates"]
+            print(f"[INFO] resumed WM only from {path} at iteration {self.iteration}")
+            return
+        if mode != "full":
+            raise ValueError(f"unknown resume_mode {mode!r}")
         if "wm" not in skip_keys:
             self.wm.load_state_dict(ck["wm"])
         if "policy" not in skip_keys:
@@ -174,7 +201,7 @@ class Trainer:
             # ---------------- (1) collect one vectorised env step
             t0 = time.perf_counter()
             action = self.act(obs)
-            obs, rew, term, tout, extras = env.step(action)
+            obs, rew, term, tout, _extras = env.step(action)
             self.ep_reward_sum += rew
             self.ep_len += 1
             done = term | tout
@@ -224,7 +251,7 @@ class Trainer:
                     tot = allreduce_mean(float(sum(finished_returns))) * self.world
                     cnt = allreduce_mean(float(len(finished_returns))) * self.world
                     finished_returns = [tot / cnt] if cnt > 0 else []
-                    n_finished = int(round(cnt))
+                    n_finished = round(cnt)
                 else:
                     n_finished = len(finished_returns)
                 if not self.is_main:

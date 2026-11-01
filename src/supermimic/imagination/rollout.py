@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 import torch
@@ -10,13 +11,33 @@ from supermimic.data.replay_buffer import StartBatch
 from supermimic.envs.mdp.motion_library import MotionLibrary
 from supermimic.imagination.compiled import REWARD_TERM_NAMES, ImagStep
 from supermimic.policy.nets import Policy
-from supermimic.world_model.heads import ReferenceFrame, analytic_observation, anchor_relative_obs, flatten_history_term_major
+from supermimic.world_model.heads import (
+    ReferenceFrame,
+    analytic_observation,
+    anchor_relative_obs,
+    flatten_history_term_major,
+)
 from supermimic.world_model.wm_trainer import reference_at
 from supermimic.world_model.world_model import WorldModel
 
 # Paper Table A.1 sensor noise (uniform half-widths) in the 93-d observation order.
 OBS_NOISE_HALF = torch.tensor([0.01] * 29 + [0.5] * 29 + [0.2] * 3 + [0.05] * 3 + [0.0] * 29)
 ANCHOR_NOISE_HALF = torch.tensor([0.25] * 3 + [0.05] * 6)
+
+
+def _check_finite(name: str, x: torch.Tensor, step: int | None = None) -> None:
+    """Debug-only NaN/Inf guard for the imagination path (env var gated)."""
+    if os.environ.get("SUPERMIMIC_DEBUG_NAN") != "1":
+        return
+    finite = torch.isfinite(x)
+    if finite.all():
+        return
+    bad = int((~finite).sum().item())
+    flat = (~finite).flatten().nonzero().flatten()[:8].tolist()
+    where = f" step={step}" if step is not None else ""
+    raise RuntimeError(
+        f"[imagine-nan]{where} {name}: {bad}/{x.numel()} non-finite, first idx={flat}"
+    )
 
 
 @dataclass
@@ -67,8 +88,15 @@ def imagine(
 
     # Initial observation history from the logged states/actions (noise re-sampled per frame).
     hist = [add_noise(analytic_observation(start.hist_states[i], start.hist_actions[i], start.xi, q0)) for i in range(start.hist_states.shape[0])]
+    _check_finite("start.state", start.state)
+    _check_finite("start.xi", start.xi)
+    _check_finite("start.hist_states", start.hist_states)
+    _check_finite("start.hist_actions", start.hist_actions)
+    _check_finite("hist", torch.stack(hist, 0))
     s = start.state
     z = wm.encode_state(s, start.xi) if wm.is_koopman else None
+    if z is not None:
+        _check_finite("z0", z)
     frame = start.frame.clone()
     a_prev = start.prev_action
     c = torch.ones(n, device=device)
@@ -93,15 +121,28 @@ def imagine(
     else:
         anchor_pose = None
     goals = [make_goal(frame, ref, anchor_pose)]
+    _check_finite("goal0", goals[0])
     e_roots = [wm.heads.root_error_features(s, ref)]
     term_sum = torch.zeros(len(REWARD_TERM_NAMES), device=device)
 
     for t in range(horizon):
         obs_flat = flatten_history_term_major(torch.stack(hist, 0))
+        _check_finite(f"t{t}.obs_flat", obs_flat)
+        _check_finite(f"t{t}.goal", goals[-1])
+        _check_finite(f"t{t}.s", s)
+        if z is not None:
+            _check_finite(f"t{t}.z", z)
         a = policy(obs_flat, goals[-1])
+        _check_finite(f"t{t}.action", a)
         if wm.is_koopman and wm.cfg.koopman_mode == "reencode":
             z = wm.encode_state(s, start.xi)  # re-encode the predicted state every step
         s_next, z, r, term_vec, logits, obs_clean, anchor_pose = step_fn(z, s, a, a_prev, start.xi, ref)
+        _check_finite(f"t{t}.s_next", s_next)
+        if z is not None:
+            _check_finite(f"t{t}.z_next", z)
+        _check_finite(f"t{t}.reward", r)
+        _check_finite(f"t{t}.logits", logits)
+        _check_finite(f"t{t}.obs_clean", obs_clean)
         d = torch.sigmoid(logits)
         c = c * (1.0 - d)
         term_sum += term_vec.detach().mean(-1)

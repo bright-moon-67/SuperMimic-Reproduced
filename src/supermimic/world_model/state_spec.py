@@ -21,6 +21,8 @@ Loss / error normalisation (D3): per-quantity nominal scales sigma applied to th
 
 from __future__ import annotations
 
+import math
+import os
 from dataclasses import dataclass, field
 
 import torch
@@ -53,6 +55,13 @@ class StateSpecCfg:
     # Input feature scales for [root_z, rot6d, lin_vel_h, ang_vel_b, joint_pos, joint_vel] (divide by these).
     in_scale: tuple[float, ...] = (1.0, 1.0, 1.0, 2.0, 1.0, 5.0)
     explicit_integration: bool = True
+    # Safety clamps for the explicit integrator.  The network output is
+    # unbounded; a finite but huge rotation increment overflows float32 inside
+    # quat_from_rotvec (angle**2 -> inf -> sin(inf)=NaN).  Clamp before the
+    # exponential map, and clamp the raw delta so a bad extrapolation cannot
+    # poison the whole imagination rollout.
+    delta_clip: float = 100.0
+    max_rot_inc: float = math.pi
     # xi normalisation: (offset, scale) for friction, encoder bias, com offset.
     xi_offset: tuple[float, ...] = field(default_factory=lambda: (0.75,) + (0.0,) * 29 + (0.0,) * 3)
     xi_scale: tuple[float, ...] = field(default_factory=lambda: (0.45,) + (0.01,) * 29 + (0.05,) * 3)
@@ -62,7 +71,7 @@ class StateSpec:
     def __init__(self, cfg: StateSpecCfg, device, dtype=torch.float32):
         self.cfg = cfg
         self.dt = cfg.dt
-        rep = lambda scales, sizes: torch.cat([torch.full((n,), float(s)) for s, n in zip(scales, sizes)])  # noqa: E731
+        rep = lambda scales, sizes: torch.cat([torch.full((n,), float(s)) for s, n in zip(scales, sizes)])
         self.err_scale = rep(cfg.err_scale, (3, 3, 3, 3, NJ, NJ)).to(device=device, dtype=dtype)
         self.out_scale = rep(cfg.out_scale, (3, 3, NJ, 3, 3, NJ)).to(device=device, dtype=dtype)
         self.in_scale = rep(cfg.in_scale, (1, 6, 3, 3, NJ, NJ)).to(device=device, dtype=dtype)
@@ -90,9 +99,30 @@ class StateSpec:
 
     # ------------------------------------------------------------------ integration
 
+    @staticmethod
+    def _debug_finite(name: str, x: torch.Tensor) -> None:
+        if os.environ.get("SUPERMIMIC_DEBUG_NAN") != "1":
+            return
+        bad = ~torch.isfinite(x)
+        if bad.any():
+            idx = bad.flatten().nonzero().flatten()[:8].tolist()
+            raise RuntimeError(
+                f"[state-spec-nan] {name}: {int(bad.sum())}/{x.numel()} non-finite, first idx={idx}"
+            )
+
     def integrate(self, s: torch.Tensor, delta: torch.Tensor) -> torch.Tensor:
         """Apply the (unscaled) network output ``delta`` (…, 70) to state ``s`` (…, 71)."""
         d = delta * self.out_scale
+        if self.cfg.delta_clip > 0:
+            # Keep the integrator finite even if the network extrapolates wildly;
+            # this is a safety net, not part of the nominal dynamics.
+            d = torch.nan_to_num(
+                d,
+                nan=0.0,
+                posinf=self.cfg.delta_clip,
+                neginf=-self.cfg.delta_clip,
+            ).clamp(-self.cfg.delta_clip, self.cfg.delta_clip)
+        self._debug_finite("scaled_delta", d)
         dv_h, dw_b, dqd, dp_h, dth_b, dq = d[..., 0:3], d[..., 3:6], d[..., 6:35], d[..., 35:38], d[..., 38:41], d[..., 41:70]
         p, q, qj, v, w, qd = self.split(s)
         q = quat_normalize(q)
@@ -102,7 +132,19 @@ class StateSpec:
         qd_new = qd + dqd
         dt = self.dt if self.cfg.explicit_integration else 0.0
         p_new = p + dt * v_new + quat_apply(hq, dp_h)
-        q_new = quat_normalize(quat_mul(q, quat_from_rotvec(dt * w_new + dth_b)))
+        rot_inc = dt * w_new + dth_b
+        rot_inc = torch.nan_to_num(
+            rot_inc,
+            nan=0.0,
+            posinf=self.cfg.max_rot_inc,
+            neginf=-self.cfg.max_rot_inc,
+        )
+        rot_norm = torch.linalg.vector_norm(rot_inc, dim=-1, keepdim=True)
+        rot_scale = torch.clamp(self.cfg.max_rot_inc / rot_norm.clamp_min(1e-12), max=1.0)
+        rot_inc = rot_inc * rot_scale
+        self._debug_finite("rot_inc", rot_inc)
+        q_new = quat_normalize(quat_mul(q, quat_from_rotvec(rot_inc)))
+        self._debug_finite("q_new", q_new)
         qj_new = qj + dt * qd_new + dq
         return torch.cat([p_new, q_new, qj_new, v_new, w_new, qd_new], dim=-1)
 

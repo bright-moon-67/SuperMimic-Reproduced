@@ -119,6 +119,9 @@ def main(
     lambda_lift: float | None = None,  # None = KoopmanCfg default
     lambda_rec: float | None = None,  # None = KoopmanCfg default
     lambda_cons: float | None = None,  # P2-A: latent consistency loss
+    cons_target_detach: bool = False,
+    lambda_lift_phys: float | None = None,
+    lambda_lift_phi: float | None = None,
     a_rho_target: float | None = None,  # P2-B: spectral-normalise the A init
     stab_mode: str = "none",  # P2-B: none | frobenius | power
     lambda_stab: float = 0.0,  # P2-B: weight of the stability term
@@ -154,8 +157,10 @@ def main(
         files = list(meta_in["npz_files"])
         if train_clips is None:
             train_clips = tuple(meta_in.get("train_clips") or ("walk1_subject1", "dance1_subject1"))
-        if protocol not in ("a", "b"):
-            raise ValueError(f"protocol must be 'a' or 'b', got {protocol!r}")
+        if protocol not in ("a", "b", "val", "test_a", "test_b"):
+            raise ValueError(
+                f"protocol must be a, b, val, test_a or test_b; got {protocol!r}"
+            )
         print(f"[data] frozen snapshot {data_in}", flush=True)
     else:
         names = npz_names or list(train_clips or ("walk1_subject1", "dance1_subject1"))
@@ -220,6 +225,9 @@ def main(
                 wm_cfg.koopman.lambda_rec = lambda_rec
             if lambda_cons is not None:
                 wm_cfg.koopman.lambda_cons = lambda_cons
+            wm_cfg.koopman.cons_target_detach = cons_target_detach
+            wm_cfg.koopman.lambda_lift_phys = lambda_lift_phys
+            wm_cfg.koopman.lambda_lift_phi = lambda_lift_phi
             wm_cfg.koopman.a_rho_target = a_rho_target
             wm_cfg.koopman.stab_mode = stab_mode
             wm_cfg.koopman.lambda_stab = lambda_stab
@@ -349,6 +357,9 @@ def main(
             "koopman_rank_domain": koopman_rank_domain,
             "koopman_rank_action_domain": koopman_rank_action_domain,
             "lambda_cons": lambda_cons,
+            "cons_target_detach": cons_target_detach,
+            "lambda_lift_phys": lambda_lift_phys,
+            "lambda_lift_phi": lambda_lift_phi,
             "n_sigma": n_sigma,
             "wm_lr": wm_lr,
             "grad_clip": grad_clip,

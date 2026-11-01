@@ -217,12 +217,17 @@ class WorldModel(nn.Module):
         xi_norm = self.spec.normalize_xi(xi)
         z = self.encode_state(s, xi)
         klift, krec = self.cfg.koopman.lambda_lift, self.cfg.koopman.lambda_rec
+        klift_phys = klift if self.cfg.koopman.lambda_lift_phys is None else self.cfg.koopman.lambda_lift_phys
+        klift_phi = klift if self.cfg.koopman.lambda_lift_phi is None else self.cfg.koopman.lambda_lift_phi
         kcons = self.cfg.koopman.lambda_cons
         kstab = self.cfg.koopman.lambda_stab
         state_in_latent = getattr(self.dynamics, "state_in_latent", False)
         total_state = 0.0
         total_term = 0.0
         total_lift = 0.0
+        total_lift_raw = 0.0
+        total_lift_phys = torch.zeros((), device=states.device)
+        total_lift_phi = torch.zeros((), device=states.device)
         total_rec = 0.0
         total_cons = 0.0
         total_stab = torch.zeros((), device=states.device)
@@ -250,13 +255,26 @@ class WorldModel(nn.Module):
             s, z, sq, bce, logits = step_fn(z, s, a_exec[j], xi_norm, states[j + 1], done[j], refs[j].root_pos_w, refs[j].root_quat_w)
             # lift: predicted z vs encoding of the TRUE next state (target side detached)
             z_target = self.encode_state(states[j + 1], xi).detach()
-            total_lift = total_lift + (z - z_target).pow(2).mean(-1).mean()
+            diff = z - z_target
+            if state_in_latent:
+                lp = diff[..., :71].pow(2).mean()
+                lf = diff[..., 71:].pow(2).mean()
+                total_lift = total_lift + klift_phys * lp + klift_phi * lf
+                total_lift_phys = total_lift_phys + lp
+                total_lift_phi = total_lift_phi + lf
+            else:
+                l_raw = diff.pow(2).mean()
+                total_lift = total_lift + klift * l_raw
+            total_lift_raw = total_lift_raw + diff.pow(2).mean()
             total_state = total_state + sq.sum(-1).mean()
             total_term = total_term + bce.mean()
             # P2-A consistency: propagated z vs re-encoding the predicted state.
             # For state-augmented Koopman only phi is supervised; the state block
             # is already tied to the integration path.
-            cons_step = z - self.encode_state(s, xi)
+            cons_target = self.encode_state(s, xi)
+            if self.cfg.koopman.cons_target_detach:
+                cons_target = cons_target.detach()
+            cons_step = z - cons_target
             if state_in_latent:
                 cons_step = cons_step[..., 71:]
             total_cons = total_cons + cons_step.pow(2).mean()
@@ -270,7 +288,7 @@ class WorldModel(nn.Module):
         loss = (
             total_state / k
             + self.cfg.term_loss_weight * total_term / k
-            + klift * total_lift / k
+            + total_lift / k
             + krec * total_rec / k
             + kcons * total_cons / k
             + kstab * total_stab / k
@@ -278,7 +296,10 @@ class WorldModel(nn.Module):
         metrics.update(
             state_loss=(total_state / k).detach(),
             term_bce=(total_term / k).detach(),
-            lift_loss=(total_lift / k).detach(),
+            lift_loss=(total_lift_raw / k).detach(),
+            lift_weighted=(total_lift / k).detach(),
+            lift_phys=(total_lift_phys / k).detach(),
+            lift_phi=(total_lift_phi / k).detach(),
             rec_loss=(total_rec / k).detach(),
             cons_loss=(total_cons / k).detach(),
             stab_loss=(total_stab / k).detach(),

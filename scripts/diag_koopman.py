@@ -110,6 +110,38 @@ def _load_windows(path: Path | None, device: str) -> WindowBatch | None:
     return WindowBatch(**{k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in d.items()})
 
 
+def _closed_loop_fd(wm: WorldModel, w: WindowBatch, steps: int) -> dict:
+    """Finite-difference norm of the full (s, z) closed-loop map over H steps.
+
+    sigma_max(M) only measures the linear latent matrix at one operating point;
+    it misses the decoder/integrator and the state feedback.  This diagnostic
+    perturbs both s and z for one sample and reports ||d(s_H, z_H)|| / ||d(s_0, z_0)||.
+    """
+    steps = min(steps, w.a_exec.shape[0])
+    s0 = w.states[0, :1].clone()
+    z0 = wm.encode_state(s0, w.xi[:1])
+    actions = w.a_exec[:steps, :1]
+    xi = w.xi[:1]
+
+    def rollout(s: torch.Tensor, z: torch.Tensor):
+        for t in range(steps):
+            s, z = wm.step_z(z, s, actions[t], xi)
+        return s, z
+
+    with torch.no_grad():
+        s1, z1 = rollout(s0, z0)
+        torch.manual_seed(0)
+        vs = torch.randn_like(s0)
+        vz = torch.randn_like(z0)
+        eps = 1e-4
+        s2, z2 = rollout(s0 + eps * vs, z0 + eps * vz)
+        ds = (s2 - s1) / eps
+        dz = (z2 - z1) / eps
+        num = torch.sqrt(ds.flatten(1).square().sum(-1) + dz.flatten(1).square().sum(-1)).mean()
+        den = torch.sqrt(vs.flatten(1).square().sum(-1) + vz.flatten(1).square().sum(-1)).mean()
+    return {"steps": steps, "norm": _f(num / den)}
+
+
 def _row(wm: WorldModel, w: WindowBatch, mode: str, n_sigma: int) -> dict:
     d = wm.rollout_diagnostics(w.states, w.a_exec, w.xi, mode=mode, n_sigma=n_sigma)
     nse = d["nse"]
@@ -166,6 +198,7 @@ def main(
     modes = ["latent", "reencode"] if wm.is_koopman else ["latent"]
     spectral = wm.dynamics.spectral_stats() if wm.is_koopman else {}
     e1_diff = None
+    closed_loop: dict[str, dict] = {}
     results: dict[str, dict] = {}
     for name, path in specs.items():
         w = _load_windows(path, device)
@@ -174,6 +207,11 @@ def main(
         results[name] = {}
         for mode in modes:
             results[name][mode] = _row(wm, w, mode, n_sigma)
+        if wm.is_koopman:
+            closed_loop[name] = {
+                "fd_1step": _closed_loop_fd(wm, w, 1),
+                "fd_all": _closed_loop_fd(wm, w, w.a_exec.shape[0]),
+            }
         if wm.is_koopman and "latent" in modes and "reencode" in modes:
             w0 = w
             z0 = wm.encode_state(w0.states[0], w0.xi)
@@ -187,6 +225,7 @@ def main(
         "spectral": spectral,
         "e1_latent_vs_reencode_max_abs": e1_diff,
         "g0b_pass": e1_diff is not None and e1_diff <= 1e-6,
+        "closed_loop_fd": closed_loop,
         "eval_sha256": {k: (_sha256(p) if p is not None else None) for k, p in specs.items()},
         "git_commit": _git_commit(Path(__file__).resolve().parents[1]),
         "argv": sys.argv,
@@ -204,6 +243,8 @@ def main(
                 f"cons_rel={r['cons_rel_mean']} erank={r['latent_erank_mean']} "
                 f"sigma_max={r['sigma_max_M_max']} prod_norm={r['prod_norm_max']} invalid={r['invalid']}"
             )
+    for name, cl in closed_loop.items():
+        print(f"{name:5s} closed_loop_fd_1={cl['fd_1step']['norm']:.4f} fd_all={cl['fd_all']['norm']:.4f}")
     print(f"saved {out}")
 
 

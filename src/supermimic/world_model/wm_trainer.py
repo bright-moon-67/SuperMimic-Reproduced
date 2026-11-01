@@ -8,8 +8,8 @@ import torch
 
 from supermimic.data.replay_buffer import ReplayBuffer, WindowBatch
 from supermimic.envs.mdp.motion_library import MotionLibrary
-from supermimic.world_model.heads import ReferenceFrame
 from supermimic.training.distributed import allreduce_grads
+from supermimic.world_model.heads import ReferenceFrame
 from supermimic.world_model.world_model import WorldModel
 
 
@@ -54,10 +54,17 @@ class WorldModelTrainer:
         for _ in range(self.cfg.batches_per_update):
             w = buffer.sample_windows(self.cfg.batch_size, self.cfg.window)
             loss, m = self.loss_on(w)
+            if not torch.isfinite(loss):
+                # A single poisoned window must not overwrite a good world model.
+                self.opt.zero_grad(set_to_none=True)
+                continue
             self.opt.zero_grad(set_to_none=True)
             loss.backward()
             allreduce_grads(self.wm)
             gn = torch.nn.utils.clip_grad_norm_(self.wm.parameters(), self.cfg.grad_clip)
+            if not torch.isfinite(gn):
+                self.opt.zero_grad(set_to_none=True)
+                continue
             self.opt.step()
             m["loss"] = loss.detach()
             m["grad_norm"] = gn.detach()
