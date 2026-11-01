@@ -71,6 +71,8 @@ class TrainConfig:
     policy_trainer: PolicyTrainerCfg = field(default_factory=PolicyTrainerCfg)
     schedule: ScheduleCfg = field(default_factory=ScheduleCfg)
     resume: Path | None = None
+    # Optional shared fixed 32-step evaluation windows (WindowBatch .pt).
+    eval_windows: Path | None = None
     # full: restore weights + optimizers + iteration; transfer_policy: load Actor/Critic
     # weights only and reset WM/optimizers/schedule; wm_only: restore WM + wm optimizer.
     resume_mode: str = "full"

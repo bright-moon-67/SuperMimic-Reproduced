@@ -12,8 +12,9 @@ $$
 J_{\mathrm{sim}}v \approx \frac{F_{\mathrm{sim}}(s,a+\epsilon v)-F_{\mathrm{sim}}(s,a-\epsilon v)}{2\epsilon}
 $$
 
-真实仿真使用 MuJoCo/Warp，通过 `StateIO.write` 恢复同一状态；动作噪声关闭。
-这是**单步**诊断，不是多步 BPTT 或策略梯度诊断。
+真实仿真使用 MuJoCo/Warp，通过 `StateIO.write` 恢复同一状态，并通过
+`SimContext.write` 恢复数据中的 `xi`（摩擦、encoder bias、COM offset）；
+动作噪声关闭。这是**单步**诊断，不是多步 BPTT 或策略梯度诊断。
 
 ## 结果
 
@@ -26,6 +27,7 @@ $$
 
 - 方向余弦约 0.93，说明动作对状态变化的主要方向基本一致；
 - relative L2 约 0.41，幅值比约 0.72，说明 Koopman 的动作敏感度仍偏小；
+- 该结果已在恢复 `xi` 域参数后重新测量，但仍只覆盖 gate 1000 checkpoint；
 - 这只能说明单步方向一致性，不能直接证明多步 BPTT 或策略梯度正确。
 
 原始 JSON：

@@ -12,6 +12,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from supermimic.config import TrainConfig
 from supermimic.data.motion_convert import load_g1_model
+from supermimic.data.replay_buffer import WindowBatch
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env
 from supermimic.envs.mdp.motion_library import discover_npz
 from supermimic.envs.tracking_env_cfg import ANCHOR_BODY, ROOT_BODY, TRACKED_BODIES
@@ -48,14 +49,21 @@ class Trainer:
         self.log_dir = Path(cfg.log_root) / cfg.run_name
         self.log_dir.mkdir(parents=True, exist_ok=True)
         if self.is_main:
-            (self.log_dir / "config.json").write_text(json.dumps(asdict(cfg), indent=2, default=str))
+            (self.log_dir / "config.json").write_text(
+                json.dumps(asdict(cfg), indent=2, default=str)
+            )
         self.writer = SummaryWriter(str(self.log_dir / "tb")) if self.is_main else None
 
         if cfg.data.library is not None:
             files = [cfg.data.library]
             cfg.env.compact_library = True
         else:
-            files = discover_npz(cfg.data.npz_dir, limit=cfg.data.limit, names=cfg.data.clips, manifest=cfg.data.manifest)
+            files = discover_npz(
+                cfg.data.npz_dir,
+                limit=cfg.data.limit,
+                names=cfg.data.clips,
+                manifest=cfg.data.manifest,
+            )
         if not files:
             raise FileNotFoundError(f"no clips under {cfg.data.npz_dir}")
         self.env = make_env(
@@ -84,17 +92,28 @@ class Trainer:
         robot = env.scene["robot"]
 
         fk = G1Kinematics(load_g1_model(), device=self.device)
-        heads = AnalyticHeads(fk, TRACKED_BODIES, ANCHOR_BODY, ROOT_BODY, robot.data.soft_joint_pos_limits[0].clone(), robot.data.default_joint_pos[0].clone())
+        heads = AnalyticHeads(
+            fk,
+            TRACKED_BODIES,
+            ANCHOR_BODY,
+            ROOT_BODY,
+            robot.data.soft_joint_pos_limits[0].clone(),
+            robot.data.default_joint_pos[0].clone(),
+        )
         self.wm = WorldModel(cfg.world_model, heads, self.device)
         self.policy = Policy(cfg.policy).to(self.device)
         self.critic = Critic(cfg.critic, pcfg=cfg.policy).to(self.device)
         for m in (self.wm, self.policy, self.critic):
             broadcast_params(m)
         self.wm_trainer = WorldModelTrainer(self.wm, self.lib, cfg.wm_trainer)
-        self.policy_trainer = PolicyTrainer(self.wm, self.policy, self.critic, self.lib, cfg.policy_trainer)
+        self.policy_trainer = PolicyTrainer(
+            self.wm, self.policy, self.critic, self.lib, cfg.policy_trainer
+        )
         n_params = lambda m: sum(p.numel() for p in m.parameters())
         if self.is_main:
-            print(f"[INFO] params: world model {n_params(self.wm)/1e6:.2f}M, policy {n_params(self.policy)/1e6:.2f}M, critic {n_params(self.critic)/1e6:.3f}M")
+            print(
+                f"[INFO] params: world model {n_params(self.wm) / 1e6:.2f}M, policy {n_params(self.policy) / 1e6:.2f}M, critic {n_params(self.critic) / 1e6:.3f}M"
+            )
             if cfg.world_model.type == "koopman":
                 kcfg = cfg.world_model.koopman
                 print(
@@ -112,8 +131,22 @@ class Trainer:
         self.start_iteration = 0  # warm-up (buffer refill) counts from here, also after a resume
         self.num_updates = 0
         self.num_actor_updates = 0
+        self.num_wm_optimizer_steps = 0
+        self.num_actor_optimizer_steps = 0
         self._utd_acc = 0.0
-        self._fixed_eval = None  # first fixed 32-step batch for comparable online E1/E8/E32
+        self._fixed_eval = None
+        if cfg.eval_windows is not None:
+            d = torch.load(cfg.eval_windows, map_location="cpu", weights_only=False)
+            self._fixed_eval = WindowBatch(
+                **{
+                    k: (v.to(self.device) if isinstance(v, torch.Tensor) else v)
+                    for k, v in d.items()
+                }
+            )
+            if self.is_main:
+                print(
+                    f"[INFO] shared fixed eval windows: {cfg.eval_windows} {tuple(self._fixed_eval.states.shape)}"
+                )
         if cfg.resume is not None:
             self.load(cfg.resume, skip=cfg.resume_skip, mode=cfg.resume_mode)
 
@@ -126,6 +159,8 @@ class Trainer:
             {
                 "iteration": self.iteration,
                 "num_updates": self.num_updates,
+                "num_wm_optimizer_steps": self.num_wm_optimizer_steps,
+                "num_actor_optimizer_steps": self.num_actor_optimizer_steps,
                 "wm": self.wm.state_dict(),
                 "policy": self.policy.state_dict(),
                 "critic": self.critic.state_dict(),
@@ -165,6 +200,8 @@ class Trainer:
             self.iteration = ck["iteration"]
             self.start_iteration = self.iteration
             self.num_updates = ck["num_updates"]
+            self.num_wm_optimizer_steps = ck.get("num_wm_optimizer_steps", 0)
+            self.num_actor_optimizer_steps = ck.get("num_actor_optimizer_steps", 0)
             print(f"[INFO] resumed WM only from {path} at iteration {self.iteration}")
             return
         if mode != "full":
@@ -186,7 +223,11 @@ class Trainer:
         self.iteration = ck["iteration"]
         self.start_iteration = self.iteration
         self.num_updates = ck["num_updates"]
-        print(f"[INFO] resumed from {path} at iteration {self.iteration} (skip: {sorted(skip_keys) or 'none'})")
+        self.num_wm_optimizer_steps = ck.get("num_wm_optimizer_steps", 0)
+        self.num_actor_optimizer_steps = ck.get("num_actor_optimizer_steps", 0)
+        print(
+            f"[INFO] resumed from {path} at iteration {self.iteration} (skip: {sorted(skip_keys) or 'none'})"
+        )
 
     # ------------------------------------------------------------------ main loop
 
@@ -241,24 +282,61 @@ class Trainer:
                 self._utd_acc += sch.updates_per_env_step
                 while self._utd_acc >= 1.0:
                     self._utd_acc -= 1.0
-                    lr = cosine_lr(self.iteration, sch.total_iterations, cfg.wm_trainer.lr, sch.lr_final_ratio, sch.lr_decay_fraction)
+                    lr = cosine_lr(
+                        self.iteration,
+                        sch.total_iterations,
+                        cfg.wm_trainer.lr,
+                        sch.lr_final_ratio,
+                        sch.lr_decay_fraction,
+                    )
                     self.wm_trainer.set_lr(lr)
                     self.policy_trainer.set_lr(lr * cfg.policy_trainer.lr / cfg.wm_trainer.lr)
                     t0 = time.perf_counter()
-                    m_wm = {}
+                    m_wm_sum: dict[str, float] = {}
+                    m_wm_cnt: dict[str, int] = {}
+                    wm_first = float("nan")
+                    wm_last = float("nan")
+                    wm_steps = 0
                     for _ in range(sch.wm_updates_per_policy_update):
-                        m_wm = self.wm_trainer.update(self.buffer)
+                        m = self.wm_trainer.update(self.buffer)
+                        steps = int(m.get("optimizer_steps", 0))
+                        wm_steps += steps
+                        if torch.isfinite(
+                            torch.tensor(m.get("nse_first", float("nan")))
+                        ) and not torch.isfinite(torch.tensor(wm_first)):
+                            wm_first = m["nse_first"]
+                        if torch.isfinite(torch.tensor(m.get("nse_last", float("nan")))):
+                            wm_last = m["nse_last"]
+                        for k, v in m.items():
+                            # Skip bookkeeping; average data metrics by the number of
+                            # optimizer steps actually taken, not by the configured ratio.
+                            if k in {"optimizer_steps", "nse_first", "nse_last"}:
+                                continue
+                            weight = 1 if k in {"clip_frac", "skipped"} else steps
+                            if weight == 0:
+                                continue
+                            m_wm_sum[k] = m_wm_sum.get(k, 0.0) + float(v) * weight
+                            m_wm_cnt[k] = m_wm_cnt.get(k, 0) + weight
+                    self.num_wm_optimizer_steps += wm_steps
+                    m_wm = {k: m_wm_sum[k] / max(m_wm_cnt[k], 1) for k in m_wm_sum}
+                    m_wm["nse_first"] = wm_first
+                    m_wm["nse_last"] = wm_last
                     torch.cuda.synchronize()
                     timers["wm"] += time.perf_counter() - t0
                     t0 = time.perf_counter()
-                    m_pi = {}
-                    actor_ready = (
-                        self.iteration - self.start_iteration >= sch.wm_only_iterations
-                    )
+                    m_pi_sum: dict[str, float] = {}
+                    m_pi_cnt = 0
+                    actor_ready = self.iteration - self.start_iteration >= sch.wm_only_iterations
                     if actor_ready:
                         for _ in range(sch.policy_updates_per_wm_update):
                             m_pi = self.policy_trainer.update(self.buffer)
+                            for k, v in m_pi.items():
+                                if torch.isfinite(torch.tensor(float(v))):
+                                    m_pi_sum[k] = m_pi_sum.get(k, 0.0) + float(v)
+                            m_pi_cnt += 1
                         self.num_actor_updates += 1
+                        self.num_actor_optimizer_steps += sch.policy_updates_per_wm_update
+                    m_pi = {k: v / max(m_pi_cnt, 1) for k, v in m_pi_sum.items()}
                     torch.cuda.synchronize()
                     timers["policy"] += time.perf_counter() - t0
                     self.num_updates += 1
@@ -293,7 +371,9 @@ class Trainer:
                 elif finished_returns:
                     tr = sum(finished_returns) / len(finished_returns)
                     self.writer.add_scalar("train/episode_norm_return", tr, it)
-                    self.writer.add_scalar("train/episode_len", sum(finished_lens) / max(len(finished_lens), 1), it)
+                    self.writer.add_scalar(
+                        "train/episode_len", sum(finished_lens) / max(len(finished_lens), 1), it
+                    )
                 else:
                     tr = float("nan")
                 with torch.no_grad():
@@ -304,13 +384,24 @@ class Trainer:
                         if self._fixed_eval is None:
                             self._fixed_eval = self.buffer.sample_windows(1024, 32)
                         fixed_err = self.wm_trainer.error_on(self._fixed_eval)
-                        self.writer.add_scalar("wm/train_nse_1step", agg.get("wm/nse_1step", float("nan")) / max(agg_n, 1), it)
+                        self.writer.add_scalar(
+                            "wm/train_nse_1step",
+                            agg.get("wm/nse_1step", float("nan")) / max(agg_n, 1),
+                            it,
+                        )
                         self.writer.add_scalar("wm/eval_nse_1step", float(err[0]), it)
                         self.writer.add_scalar("wm/eval_nse_8step", float(err[7]), it)
                         self.writer.add_scalar("wm/eval_nse_32step", float(err[31]), it)
-                        self.writer.add_scalar("wm/fixed_nse_1step", float(fixed_err[0]), it)
-                        self.writer.add_scalar("wm/fixed_nse_8step", float(fixed_err[7]), it)
-                        self.writer.add_scalar("wm/fixed_nse_32step", float(fixed_err[31]), it)
+                        for idx, label in (
+                            (0, "1step"),
+                            (7, "8step"),
+                            (15, "16step"),
+                            (31, "32step"),
+                        ):
+                            if len(fixed_err) > idx:
+                                self.writer.add_scalar(
+                                    f"wm/fixed_nse_{label}", float(fixed_err[idx]), it
+                                )
                     else:
                         err = None
                 if self.is_main:
@@ -319,20 +410,30 @@ class Trainer:
                     self.writer.add_scalar("time/hours", elapsed / 3600, it)
                     self.writer.add_scalar("time/updates", self.num_updates, it)
                     self.writer.add_scalar("time/actor_updates", self.num_actor_updates, it)
-                    self.writer.add_scalar("sampler/entropy", float(self.command.metrics["sampling_entropy"][0]), it)
-                    self.writer.add_scalar("sampler/bin_return_mean", float(self.command.bin_return.mean()), it)
+                    self.writer.add_scalar(
+                        "time/wm_optimizer_steps", self.num_wm_optimizer_steps, it
+                    )
+                    self.writer.add_scalar(
+                        "time/actor_optimizer_steps", self.num_actor_optimizer_steps, it
+                    )
+                    self.writer.add_scalar(
+                        "sampler/entropy", float(self.command.metrics["sampling_entropy"][0]), it
+                    )
+                    self.writer.add_scalar(
+                        "sampler/bin_return_mean", float(self.command.bin_return.mean()), it
+                    )
                     dt_log = time.time() - last_log
                     last_log = time.time()
                     msg = (
-                        f"it {it} | {elapsed/3600:.2f} h | {sch.log_interval / dt_log:.1f} it/s | updates {self.num_updates} | "
+                        f"it {it} | {elapsed / 3600:.2f} h | {sch.log_interval / dt_log:.1f} it/s | updates {self.num_updates} | "
                         f"train_ret {tr:.3f} (n={n_finished}) | "
-                        f"wm train_nse1 {agg.get('wm/nse_1step', float('nan'))/max(agg_n,1):.4f} "
+                        f"wm train_nse1 {agg.get('wm/nse_1step', float('nan')) / max(agg_n, 1):.4f} "
                         f"eval_nse1 {(float(err[0]) if err is not None else float('nan')):.4f} "
                         f"eval_nse8 {(float(err[7]) if err is not None else float('nan')):.4f} "
                         f"eval_nse32 {(float(err[31]) if err is not None else float('nan')):.4f} "
-                        f"wm_gn {agg.get('wm/grad_norm', float('nan'))/max(agg_n,1):.3f} "
-                        f"pi_gn {agg.get('policy/policy_grad_norm', float('nan'))/max(agg_n,1):.3f} | "
-                        f"imag_ret {agg.get('policy/imag_return_undisc', float('nan'))/max(agg_n,1):.3f} surv {agg.get('policy/imag_survival_H', float('nan'))/max(agg_n,1):.3f} | "
+                        f"wm_gn {agg.get('wm/grad_norm', float('nan')) / max(agg_n, 1):.3f} "
+                        f"pi_gn {agg.get('policy/policy_grad_norm', float('nan')) / max(agg_n, 1):.3f} | "
+                        f"imag_ret {agg.get('policy/imag_return_undisc', float('nan')) / max(agg_n, 1):.3f} surv {agg.get('policy/imag_survival_H', float('nan')) / max(agg_n, 1):.3f} | "
                         f"t sim/wm/pi {timers['sim']:.1f}/{timers['wm']:.1f}/{timers['policy']:.1f}s"
                     )
                     print(msg, flush=True)
@@ -349,7 +450,9 @@ class Trainer:
             if sch.max_hours is not None and self.iteration % sch.log_interval == 0:
                 stop = float((time.time() - t_start) / 3600 > sch.max_hours)
                 if self.world > 1:
-                    stop = allreduce_mean(stop)  # rank 0's clock decides (all ranks agree on the mean > 0)
+                    stop = allreduce_mean(
+                        stop
+                    )  # rank 0's clock decides (all ranks agree on the mean > 0)
                 if stop > 0:
                     if self.is_main:
                         print("[INFO] max_hours reached, stopping")

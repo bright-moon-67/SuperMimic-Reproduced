@@ -45,6 +45,7 @@ NUM_ENVS=${NUM_ENVS:-8192}
 TOTAL_ITERATIONS=${TOTAL_ITERATIONS:-320000}
 WM_RATIO=${WM_RATIO:-1}
 WM_ONLY_ITERS=${WM_ONLY_ITERS:-0}
+EVAL_WINDOWS=${EVAL_WINDOWS:-}
 MAX_HOURS=${MAX_HOURS:-}
 STAB=${STAB:-1}
 LAMBDA_STAB=${LAMBDA_STAB:-10.0}
@@ -101,6 +102,10 @@ fi
 MAX_HOURS_ARGS=()
 if [ -n "$MAX_HOURS" ]; then
     MAX_HOURS_ARGS=(--schedule.max-hours "$MAX_HOURS")
+fi
+EVAL_ARGS=()
+if [ -n "$EVAL_WINDOWS" ]; then
+    EVAL_ARGS=(--eval-windows "$EVAL_WINDOWS")
 fi
 
 RESUME_ARGS=()
@@ -173,4 +178,5 @@ fi
     --schedule.checkpoint-interval 4000 \
     --schedule.keep-checkpoints 4 \
     "${MAX_HOURS_ARGS[@]}" \
+    "${EVAL_ARGS[@]}" \
     "${RESUME_ARGS[@]}"

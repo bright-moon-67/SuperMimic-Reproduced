@@ -30,7 +30,9 @@ import tyro
 from supermimic.data.replay_buffer import WindowBatch
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env
 from supermimic.envs.mdp.motion_library import discover_npz
+from supermimic.envs.sim_context import SimContext
 from supermimic.envs.state_io import StateIO
+from supermimic.envs.tracking_env_cfg import FOOT_GEOM_REGEX
 from supermimic.world_model.koopman import KoopmanCfg
 from supermimic.world_model.state_spec import StateSpecCfg
 from supermimic.world_model.world_model import WorldModel, WorldModelCfg
@@ -138,6 +140,7 @@ def main(
     xi = w.xi[:n_samples].clone()
     env = _make_env(npz_dir, device)
     state_io = StateIO(env)
+    sim_context = SimContext(env, FOOT_GEOM_REGEX)
     env_ids = torch.zeros(1, dtype=torch.long, device=device)
 
     def wm_step(s: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
@@ -147,8 +150,9 @@ def main(
             return s_next
         return wm.step(s, a, xi[: s.shape[0]])
 
-    def sim_step(s: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
+    def sim_step(s: torch.Tensor, a: torch.Tensor, xi_sample: torch.Tensor) -> torch.Tensor:
         state_io.write(env_ids, s)
+        sim_context.write(xi_sample)
         _, _, term, tout, _ = env.step(a)
         if bool((term | tout).any()):
             raise RuntimeError("episode terminated during one-step simulator probe")
@@ -165,8 +169,9 @@ def main(
         for i in range(n_samples):
             s0 = states[i : i + 1]
             a0 = actions[i : i + 1]
+            xi0 = xi[i : i + 1]
             try:
-                sim0 = sim_step(s0, a0)
+                sim0 = sim_step(s0, a0, xi0)
                 wm0 = wm_step(s0, a0)
             except RuntimeError:
                 skipped += 1
@@ -178,8 +183,8 @@ def main(
                 v = v / v.norm().clamp_min(1e-12)
                 ap, am = a0 + eps * v, a0 - eps * v
                 try:
-                    sp = sim_step(s0, ap)
-                    sm = sim_step(s0, am)
+                    sp = sim_step(s0, ap, xi0)
+                    sm = sim_step(s0, am, xi0)
                 except RuntimeError:
                     skipped += 1
                     continue

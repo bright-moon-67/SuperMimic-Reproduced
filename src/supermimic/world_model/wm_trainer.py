@@ -51,12 +51,18 @@ class WorldModelTrainer:
 
     def update(self, buffer: ReplayBuffer) -> dict[str, float]:
         agg: dict[str, torch.Tensor] = {}
+        optimizer_steps = 0
+        clip_hits = 0
+        nse_first: float | None = None
+        nse_last: float | None = None
+        skipped = 0
         for _ in range(self.cfg.batches_per_update):
             w = buffer.sample_windows(self.cfg.batch_size, self.cfg.window)
             loss, m = self.loss_on(w)
             if not torch.isfinite(loss):
                 # A single poisoned window must not overwrite a good world model.
                 self.opt.zero_grad(set_to_none=True)
+                skipped += 1
                 continue
             self.opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -64,14 +70,29 @@ class WorldModelTrainer:
             gn = torch.nn.utils.clip_grad_norm_(self.wm.parameters(), self.cfg.grad_clip)
             if not torch.isfinite(gn):
                 self.opt.zero_grad(set_to_none=True)
+                skipped += 1
                 continue
+            if float(gn) > self.cfg.grad_clip:
+                clip_hits += 1
             self.opt.step()
+            optimizer_steps += 1
+            if "nse_1step" in m:
+                nse = float(m["nse_1step"])
+                if nse_first is None:
+                    nse_first = nse
+                nse_last = nse
             m["loss"] = loss.detach()
             m["grad_norm"] = gn.detach()
             for k, v in m.items():
                 agg[k] = agg.get(k, 0.0) + v
         # Single host sync per update (keeps the CPU queuing GPU work across minibatches).
-        return {k: float(v) / self.cfg.batches_per_update for k, v in agg.items()}
+        out = {k: float(v) / max(optimizer_steps, 1) for k, v in agg.items()}
+        out["optimizer_steps"] = float(optimizer_steps)
+        out["clip_frac"] = float(clip_hits / max(optimizer_steps, 1))
+        out["skipped"] = float(skipped)
+        out["nse_first"] = float(nse_first) if nse_first is not None else float("nan")
+        out["nse_last"] = float(nse_last) if nse_last is not None else float("nan")
+        return out
 
     @torch.no_grad()
     def error_on(self, w: WindowBatch) -> torch.Tensor:

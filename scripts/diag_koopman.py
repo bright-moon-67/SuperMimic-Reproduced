@@ -90,9 +90,16 @@ def _load_wm(ckpt: Path | None, wm_state: Path | None, device: str) -> tuple[Wor
     path = ckpt or wm_state
     ck = torch.load(path, map_location="cpu", weights_only=False)
     if ckpt is not None:
-        state = ck["wm"]
-        cfg_dict = ck["config"]["world_model"]
-        meta = {"source": "trainer_ckpt", "path": str(path), "iteration": ck.get("iteration")}
+        if "wm" in ck:
+            state = ck["wm"]
+            cfg_dict = ck["config"]["world_model"]
+            meta = {"source": "trainer_ckpt", "path": str(path), "iteration": ck.get("iteration")}
+        elif "state_dict" in ck:
+            state = ck["state_dict"]
+            cfg_dict = ck["config"]
+            meta = {"source": "wm_state", "path": str(path), "meta": ck.get("meta", {})}
+        else:
+            raise KeyError(f"unsupported checkpoint format: {list(ck)}")
     else:
         state = ck["state_dict"]
         cfg_dict = ck["config"]
