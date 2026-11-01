@@ -39,6 +39,7 @@ import torch
 import tyro
 
 from supermimic.data.replay_buffer import WindowBatch
+from supermimic.kinematics.rotations import quat_from_rotvec, quat_mul, quat_normalize
 from supermimic.world_model.koopman import KoopmanCfg
 from supermimic.world_model.state_spec import StateSpecCfg
 from supermimic.world_model.world_model import WorldModel, WorldModelCfg
@@ -110,36 +111,124 @@ def _load_windows(path: Path | None, device: str) -> WindowBatch | None:
     return WindowBatch(**{k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in d.items()})
 
 
-def _closed_loop_fd(wm: WorldModel, w: WindowBatch, steps: int) -> dict:
-    """Finite-difference norm of the full (s, z) closed-loop map over H steps.
+def _perturb_state(s: torch.Tensor, direction: torch.Tensor, eps: float) -> torch.Tensor:
+    """Perturb a state in a representation-aware way.
 
-    sigma_max(M) only measures the linear latent matrix at one operating point;
-    it misses the decoder/integrator and the state feedback.  This diagnostic
-    perturbs both s and z for one sample and reports ||d(s_H, z_H)|| / ||d(s_0, z_0)||.
+    Position/joint/velocity blocks use additive directions.  The root quaternion
+    (wxyz) is perturbed on the unit sphere via a body-frame tangent vector:
+    q' = normalize(q * exp(eps * omega)).  This keeps ||q'||=1 and avoids
+    treating the four quaternion components as independent Euclidean axes.
+    """
+    p, q, qj, v, w, qd = (
+        s[..., 0:3],
+        s[..., 3:7],
+        s[..., 7:36],
+        s[..., 36:39],
+        s[..., 39:42],
+        s[..., 42:71],
+    )
+    dq = quat_from_rotvec(eps * direction[..., 3:6])
+    q_new = quat_normalize(quat_mul(q, dq))
+    return torch.cat(
+        [
+            p + eps * direction[..., 0:3],
+            q_new,
+            qj + eps * direction[..., 7:36],
+            v + eps * direction[..., 36:39],
+            w + eps * direction[..., 39:42],
+            qd + eps * direction[..., 42:71],
+        ],
+        dim=-1,
+    )
+
+
+def _closed_loop_sensitivity(
+    wm: WorldModel,
+    w: WindowBatch,
+    steps: int,
+    n_dirs: int = 8,
+    n_samples: int = 4,
+    eps: float = 1e-4,
+) -> dict:
+    """Directional sensitivity of the closed-loop map, not a stability proof.
+
+    Physical perturbations keep s and z consistent by re-encoding z' = E(s').
+    Latent perturbations keep s fixed and perturb only the learned phi block for
+    state-augmented Koopman (the full z for classic Koopman).  Both use central
+    differences and report mean/max over random directions and samples.
     """
     steps = min(steps, w.a_exec.shape[0])
-    s0 = w.states[0, :1].clone()
-    z0 = wm.encode_state(s0, w.xi[:1])
-    actions = w.a_exec[:steps, :1]
-    xi = w.xi[:1]
+    n_samples = min(n_samples, int(w.states.shape[1]))
+    s0 = w.states[0, :n_samples].clone()
+    xi = w.xi[:n_samples]
+    actions = w.a_exec[:steps, :n_samples]
+    state_in_latent = bool(getattr(wm.dynamics, "state_in_latent", False))
+    z0 = wm.encode_state(s0, xi)
+    latent_dim = z0.shape[-1] - (71 if state_in_latent else 0)
 
     def rollout(s: torch.Tensor, z: torch.Tensor):
         for t in range(steps):
             s, z = wm.step_z(z, s, actions[t], xi)
         return s, z
 
+    def latent_block(z: torch.Tensor) -> torch.Tensor:
+        return z[..., 71:] if state_in_latent else z
+
+    def stats(values: list[torch.Tensor]) -> dict:
+        v = torch.stack(values)
+        return {
+            "mean": _f(v.mean()),
+            "max": _f(v.max()),
+            "values": [_f(x) for x in v.flatten().tolist()],
+        }
+
+    gen = torch.Generator(device=w.states.device)
+    gen.manual_seed(0)
+    phys_out: list[torch.Tensor] = []
+    phys_to_latent: list[torch.Tensor] = []
+    latent_only: list[torch.Tensor] = []
+    lat_to_phys: list[torch.Tensor] = []
     with torch.no_grad():
-        s1, z1 = rollout(s0, z0)
-        torch.manual_seed(0)
-        vs = torch.randn_like(s0)
-        vz = torch.randn_like(z0)
-        eps = 1e-4
-        s2, z2 = rollout(s0 + eps * vs, z0 + eps * vz)
-        ds = (s2 - s1) / eps
-        dz = (z2 - z1) / eps
-        num = torch.sqrt(ds.flatten(1).square().sum(-1) + dz.flatten(1).square().sum(-1)).mean()
-        den = torch.sqrt(vs.flatten(1).square().sum(-1) + vz.flatten(1).square().sum(-1)).mean()
-    return {"steps": steps, "norm": _f(num / den)}
+        for _ in range(n_dirs):
+            # ---- physical-consistent perturbation: s' and z'=E(s') ----------------
+            u = torch.randn(s0.shape, generator=gen, device=s0.device)
+            u = u / u.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+            sp, sm = _perturb_state(s0, u, eps), _perturb_state(s0, u, -eps)
+            zp, zm = wm.encode_state(sp, xi), wm.encode_state(sm, xi)
+            sp_h, zp_h = rollout(sp, zp)
+            sm_h, zm_h = rollout(sm, zm)
+            ds = (sp_h - sm_h) / (2.0 * eps)
+            dz = (latent_block(zp_h) - latent_block(zm_h)) / (2.0 * eps)
+            phys_out.append(ds.flatten(1).norm(dim=-1).mean())
+            phys_to_latent.append(dz.flatten(1).norm(dim=-1).mean())
+
+            # ---- latent-only perturbation: fix s, perturb phi/z -------------------
+            uphi = torch.randn(n_samples, latent_dim, generator=gen, device=s0.device)
+            uphi = uphi / uphi.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+            if state_in_latent:
+                zbase = z0.clone()
+                zp = torch.cat([zbase[..., :71], zbase[..., 71:] + eps * uphi], dim=-1)
+                zm = torch.cat([zbase[..., :71], zbase[..., 71:] - eps * uphi], dim=-1)
+            else:
+                zp = z0 + eps * uphi
+                zm = z0 - eps * uphi
+            sp_h, zp_h = rollout(s0, zp)
+            sm_h, zm_h = rollout(s0, zm)
+            ds = (sp_h - sm_h) / (2.0 * eps)
+            dz = (latent_block(zp_h) - latent_block(zm_h)) / (2.0 * eps)
+            lat_to_phys.append(ds.flatten(1).norm(dim=-1).mean())
+            latent_only.append(dz.flatten(1).norm(dim=-1).mean())
+
+    return {
+        "steps": steps,
+        "n_dirs": n_dirs,
+        "n_samples": n_samples,
+        "direction_kind": "central_difference",
+        "physical": stats(phys_out),
+        "physical_to_latent": stats(phys_to_latent),
+        "latent_only": stats(latent_only),
+        "latent_to_physical": stats(lat_to_phys),
+    }
 
 
 def _row(wm: WorldModel, w: WindowBatch, mode: str, n_sigma: int) -> dict:
@@ -185,6 +274,8 @@ def main(
     eval_windows_b8: Path | None = None,
     eval_windows_b32: Path | None = None,
     n_sigma: int = 64,
+    n_dirs: int = 8,
+    n_samples: int = 4,
     out: Path = Path("experiment/koopman-world-model/diag_koopman.json"),
     device: str = "cuda:0",
 ) -> None:
@@ -209,8 +300,8 @@ def main(
             results[name][mode] = _row(wm, w, mode, n_sigma)
         if wm.is_koopman:
             closed_loop[name] = {
-                "fd_1step": _closed_loop_fd(wm, w, 1),
-                "fd_all": _closed_loop_fd(wm, w, w.a_exec.shape[0]),
+                "fd_1step": _closed_loop_sensitivity(wm, w, 1, n_dirs, n_samples),
+                "fd_all": _closed_loop_sensitivity(wm, w, w.a_exec.shape[0], n_dirs, n_samples),
             }
         if wm.is_koopman and "latent" in modes and "reencode" in modes:
             w0 = w
@@ -225,7 +316,7 @@ def main(
         "spectral": spectral,
         "e1_latent_vs_reencode_max_abs": e1_diff,
         "g0b_pass": e1_diff is not None and e1_diff <= 1e-6,
-        "closed_loop_fd": closed_loop,
+        "closed_loop_sensitivity": closed_loop,
         "eval_sha256": {k: (_sha256(p) if p is not None else None) for k, p in specs.items()},
         "git_commit": _git_commit(Path(__file__).resolve().parents[1]),
         "argv": sys.argv,
@@ -244,7 +335,13 @@ def main(
                 f"sigma_max={r['sigma_max_M_max']} prod_norm={r['prod_norm_max']} invalid={r['invalid']}"
             )
     for name, cl in closed_loop.items():
-        print(f"{name:5s} closed_loop_fd_1={cl['fd_1step']['norm']:.4f} fd_all={cl['fd_all']['norm']:.4f}")
+        for horizon, r in (("1", cl["fd_1step"]), ("all", cl["fd_all"])):
+            print(
+                f"{name:5s} closed_loop[{horizon}] physical={r['physical']['mean']:.4f} "
+                f"physical_to_latent={r['physical_to_latent']['mean']:.4f} "
+                f"latent_only={r['latent_only']['mean']:.4f} "
+                f"latent_to_physical={r['latent_to_physical']['mean']:.4f}"
+            )
     print(f"saved {out}")
 
 

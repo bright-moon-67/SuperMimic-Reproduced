@@ -1,5 +1,15 @@
 # 实验 1 结果：WM-only 对照（legacy 协议，各 3000 更新）
 
+> **Koopman 在线 ratio 对照（2026-11-01）**：见
+> [`RESULTS_ONLINE_RATIO_2026-11-01.md`](RESULTS_ONLINE_RATIO_2026-11-01.md)。
+
+> **固定数据容量/重构对照（2026-11-01）**：见
+> [`RESULTS_FORMAL_QUICK.md`](RESULTS_FORMAL_QUICK.md)。加入了 MLP 容量匹配和
+> `rec_true` 消融。
+
+> **单步动作 Jacobian 对照（2026-11-01）**：见
+> [`RESULTS_GRADIENT.md`](RESULTS_GRADIENT.md)。
+
 > **在线长训结果（2026-11-01）**：见
 > [`RESULTS_ONLINE_2026-11-01.md`](RESULTS_ONLINE_2026-11-01.md)。MLP 在线训练
 > 明显优于当前 state-augmented Koopman。

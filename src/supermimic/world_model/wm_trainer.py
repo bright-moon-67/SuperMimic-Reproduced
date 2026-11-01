@@ -74,7 +74,12 @@ class WorldModelTrainer:
         return {k: float(v) / self.cfg.batches_per_update for k, v in agg.items()}
 
     @torch.no_grad()
+    def error_on(self, w: WindowBatch) -> torch.Tensor:
+        """k-step open-loop error on a fixed window batch; (k,) tensor."""
+        return self.wm.rollout_error(w.states, w.a_exec, w.xi)
+
+    @torch.no_grad()
     def online_error(self, buffer: ReplayBuffer, n: int = 1024, k: int = 8) -> torch.Tensor:
         """k-step open-loop error on (recent) replay windows; (k,) tensor."""
         w = buffer.sample_windows(n, k)
-        return self.wm.rollout_error(w.states, w.a_exec, w.xi)
+        return self.error_on(w)

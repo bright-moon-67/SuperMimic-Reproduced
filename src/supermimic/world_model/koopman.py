@@ -44,6 +44,10 @@ class KoopmanCfg:
     # Loss weights of the latent-consistency and reconstruction terms (plan §3).
     lambda_lift: float = 0.1
     lambda_rec: float = 0.1
+    # plan6 P0-2: reconstruct the TRUE canonical state from E(x_true, xi), in
+    # addition to the predicted-state consistency loss.  Default off so old
+    # checkpoints/configs keep their behaviour; enable for the ablation.
+    lambda_rec_true: float = 0.0
     # P2-A: propagated latent vs re-encoding of the predicted state.  For
     # state-augmented Koopman this is applied to the phi block only, because the
     # canonical-state block is already tied to the integration path.

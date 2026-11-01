@@ -217,6 +217,7 @@ class WorldModel(nn.Module):
         xi_norm = self.spec.normalize_xi(xi)
         z = self.encode_state(s, xi)
         klift, krec = self.cfg.koopman.lambda_lift, self.cfg.koopman.lambda_rec
+        krec_true = self.cfg.koopman.lambda_rec_true
         klift_phys = klift if self.cfg.koopman.lambda_lift_phys is None else self.cfg.koopman.lambda_lift_phys
         klift_phi = klift if self.cfg.koopman.lambda_lift_phi is None else self.cfg.koopman.lambda_lift_phi
         kcons = self.cfg.koopman.lambda_cons
@@ -229,6 +230,7 @@ class WorldModel(nn.Module):
         total_lift_phys = torch.zeros((), device=states.device)
         total_lift_phi = torch.zeros((), device=states.device)
         total_rec = 0.0
+        total_rec_true = 0.0
         total_cons = 0.0
         total_stab = torch.zeros((), device=states.device)
         metrics = {}
@@ -244,6 +246,12 @@ class WorldModel(nn.Module):
             x_hat = self.dynamics.reconstruct(z)
             x_cur = self.spec.canonical(s)
             total_rec = total_rec + (x_hat - x_cur).pow(2).mean(-1).mean()
+            # True-state reconstruction: target is detached so this term trains
+            # the encoder/reconstruction head, not the target itself.
+            z_true = self.encode_state(states[j], xi)
+            x_true = self.spec.canonical(states[j]).detach()
+            x_true_hat = self.dynamics.reconstruct(z_true)
+            total_rec_true = total_rec_true + (x_true_hat - x_true).pow(2).mean(-1).mean()
             if kstab > 0:
                 a_stab = a_exec[j][: self.cfg.koopman.stab_batch]
                 if getattr(self.dynamics, "state_in_latent", False):
@@ -290,6 +298,7 @@ class WorldModel(nn.Module):
             + self.cfg.term_loss_weight * total_term / k
             + total_lift / k
             + krec * total_rec / k
+            + krec_true * total_rec_true / k
             + kcons * total_cons / k
             + kstab * total_stab / k
         )
@@ -301,6 +310,8 @@ class WorldModel(nn.Module):
             lift_phys=(total_lift_phys / k).detach(),
             lift_phi=(total_lift_phi / k).detach(),
             rec_loss=(total_rec / k).detach(),
+            rec_pred=(total_rec / k).detach(),
+            rec_true=(total_rec_true / k).detach(),
             cons_loss=(total_cons / k).detach(),
             stab_loss=(total_stab / k).detach(),
             consistency=(cons_num / k).detach(),

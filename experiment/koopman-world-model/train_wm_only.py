@@ -118,6 +118,7 @@ def main(
     koopman_mode: str = "latent",
     lambda_lift: float | None = None,  # None = KoopmanCfg default
     lambda_rec: float | None = None,  # None = KoopmanCfg default
+    lambda_rec_true: float | None = None,  # plan6: true-state reconstruction
     lambda_cons: float | None = None,  # P2-A: latent consistency loss
     cons_target_detach: bool = False,
     lambda_lift_phys: float | None = None,
@@ -223,6 +224,8 @@ def main(
                 wm_cfg.koopman.lambda_lift = lambda_lift
             if lambda_rec is not None:
                 wm_cfg.koopman.lambda_rec = lambda_rec
+            if lambda_rec_true is not None:
+                wm_cfg.koopman.lambda_rec_true = lambda_rec_true
             if lambda_cons is not None:
                 wm_cfg.koopman.lambda_cons = lambda_cons
             wm_cfg.koopman.cons_target_detach = cons_target_detach
@@ -356,6 +359,7 @@ def main(
             "koopman_state_in_latent": koopman_state_in_latent,
             "koopman_rank_domain": koopman_rank_domain,
             "koopman_rank_action_domain": koopman_rank_action_domain,
+            "lambda_rec_true": lambda_rec_true,
             "lambda_cons": lambda_cons,
             "cons_target_detach": cons_target_detach,
             "lambda_lift_phys": lambda_lift_phys,

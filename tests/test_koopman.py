@@ -317,6 +317,39 @@ def test_state_augmented_world_model_g0b_and_loss():
     assert wm.dynamics.A.grad is not None and torch.isfinite(wm.dynamics.A.grad).all()
 
 
+def test_state_augmented_rec_true_and_integrator_clamp():
+    from supermimic.world_model.state_spec import StateSpec, StateSpecCfg
+    from supermimic.world_model.world_model import WorldModel, WorldModelCfg
+
+    cfg = WorldModelCfg(type="koopman", koopman_mode="latent", koopman=_koopman_cfg(dz=16, rank=2))
+    cfg.koopman.state_in_latent = True
+    cfg.koopman.rank_domain = 2
+    cfg.koopman.rank_action_domain = 2
+    cfg.koopman.lambda_rec = 0.0
+    cfg.koopman.lambda_rec_true = 0.1
+    wm = WorldModel(cfg, _FakeHeads(), "cpu")
+
+    k = 4
+    states = torch.randn(k + 1, 8, 71)
+    states[..., 3:7] = torch.tensor([1.0, 0.0, 0.0, 0.0])
+    a = torch.randn(k, 8, 29)
+    xi = torch.rand(8, 33)
+    done = torch.zeros(k, 8)
+    loss, metrics = wm.window_loss(states, a, xi, done, _fake_refs(k, 8, "cpu"))
+    assert torch.isfinite(loss)
+    assert torch.isfinite(metrics["rec_pred"])
+    assert torch.isfinite(metrics["rec_true"])
+    assert metrics["rec_true"] > 0
+
+    # A finite but enormous delta must not create NaN quaternions.
+    spec = StateSpec(StateSpecCfg(), "cpu")
+    s = torch.zeros(1, 71)
+    s[:, 3] = 1.0
+    out = spec.integrate(s, torch.full((1, 70), 1e20))
+    assert torch.isfinite(out).all()
+    assert torch.allclose(out[:, 3:7].norm(dim=-1), torch.ones(1), atol=1e-5)
+
+
 def test_state_augmented_domain_coupling_and_stability():
     from supermimic.world_model.koopman import KoopmanCfg, StateAugmentedKoopman
 

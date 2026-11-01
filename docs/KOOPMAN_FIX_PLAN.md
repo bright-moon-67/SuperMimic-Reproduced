@@ -921,3 +921,18 @@ v1 把 `∂s_H/∂a_0` 当作“策略梯度方向”，这是错的：前者是
 - `pytest -q tests/test_koopman.py tests/test_wm_protocol.py`：24 passed；
 - 20-update smoke：`rec_loss` 从 0 变为 0.206/0.191，`lift_phys`/`lift_phi` 均输出；
 - 状态增广 2000-update quick run 启动：`/root/autodl-tmp/logs/wm_plan5/`。
+
+---
+
+## 15. plan7/plan8 执行记录（2026-11-01）
+
+- 在线评估日志拆分为 `wm/train_nse_1step`、`wm/eval_nse_1/8/32step` 和
+  `wm/fixed_nse_*`，保证 E1/E8/E32 来自同一批窗口；
+- 增加 `schedule.wm_updates_per_policy_update`（方案 B，支持 WM:Actor=2:1/4:1）；
+- 增加可选 `schedule.wm_only_iterations`，默认 0，不改变现有行为；
+- `PolicyTrainer` 对非有限 rollout/objective/grad 跳过 actor step；环境 action/obs
+  非有限时 fail-fast，避免污染 replay buffer；
+- 固定数据消融结果见 `experiment/koopman-world-model/RESULTS_FORMAL_QUICK.md`。
+
+关键结论：state small 在 λ_stab=0 时 E1=0.0563、E8=0.1766、E32=0.6141；
+λ_stab=10 时变为 0.0599/0.1908/0.6760，**强稳定性惩罚反而变差**。

@@ -31,6 +31,7 @@ BATCH_SIZE=${BATCH_SIZE:-4096}
 BATCHES_PER_UPDATE=${BATCHES_PER_UPDATE:-1}
 N_SIGMA=${N_SIGMA:-16}
 LAMBDA_CONS=${LAMBDA_CONS:-0.1}
+LAMBDA_REC_TRUE=${LAMBDA_REC_TRUE:-0.0}
 LAMBDA_LIFT_PHYS=${LAMBDA_LIFT_PHYS:-0.0}
 LAMBDA_LIFT_PHI=${LAMBDA_LIFT_PHI:-0.1}
 STAB=${STAB:-1}
@@ -67,7 +68,7 @@ run() {
 }
 
 pids=()
-COMMON=(--protocol a --data-in "$DATA" --batch-size "$BATCH_SIZE" --batches-per-update "$BATCHES_PER_UPDATE" --updates "$UPDATES" --eval-interval "$EVAL_INTERVAL" --n-sigma "$N_SIGMA" --lambda-cons "$LAMBDA_CONS" --cons-target-detach --lambda-lift-phys "$LAMBDA_LIFT_PHYS" --lambda-lift-phi "$LAMBDA_LIFT_PHI" --compile default --koopman-state-in-latent --koopman-rank-domain 8 --koopman-rank-action-domain 4)
+COMMON=(--protocol a --data-in "$DATA" --batch-size "$BATCH_SIZE" --batches-per-update "$BATCHES_PER_UPDATE" --updates "$UPDATES" --eval-interval "$EVAL_INTERVAL" --n-sigma "$N_SIGMA" --lambda-cons "$LAMBDA_CONS" --lambda-rec-true "$LAMBDA_REC_TRUE" --cons-target-detach --lambda-lift-phys "$LAMBDA_LIFT_PHYS" --lambda-lift-phi "$LAMBDA_LIFT_PHI" --compile default --koopman-state-in-latent --koopman-rank-domain 8 --koopman-rank-action-domain 4)
 
 run state_koopman --wm-type koopman "${COMMON[@]}" --eval-modes latent,reencode \
     --dz 128 --rank 8 --koopman-enc-hidden 256 256 --koopman-dec-hidden 256 256 \

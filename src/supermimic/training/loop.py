@@ -95,6 +95,14 @@ class Trainer:
         n_params = lambda m: sum(p.numel() for p in m.parameters())
         if self.is_main:
             print(f"[INFO] params: world model {n_params(self.wm)/1e6:.2f}M, policy {n_params(self.policy)/1e6:.2f}M, critic {n_params(self.critic)/1e6:.3f}M")
+            if cfg.world_model.type == "koopman":
+                kcfg = cfg.world_model.koopman
+                print(
+                    "[INFO] koopman: "
+                    f"state_in_latent={kcfg.state_in_latent} use_xi_state={kcfg.use_xi_state} "
+                    f"dz={kcfg.dz} rank={kcfg.rank} "
+                    f"rec_true={kcfg.lambda_rec_true} stab={kcfg.lambda_stab}"
+                )
 
         # Episode statistics of the training env (paper's "training return").
         self.ep_reward_sum = torch.zeros(env.num_envs, device=self.device)
@@ -103,7 +111,9 @@ class Trainer:
         self.iteration = 0
         self.start_iteration = 0  # warm-up (buffer refill) counts from here, also after a resume
         self.num_updates = 0
+        self.num_actor_updates = 0
         self._utd_acc = 0.0
+        self._fixed_eval = None  # first fixed 32-step batch for comparable online E1/E8/E32
         if cfg.resume is not None:
             self.load(cfg.resume, skip=cfg.resume_skip, mode=cfg.resume_mode)
 
@@ -182,11 +192,18 @@ class Trainer:
 
     @torch.no_grad()
     def act(self, obs) -> torch.Tensor:
-        return self.policy(obs["policy"], obs["goal"])
+        action = self.policy(obs["policy"], obs["goal"])
+        if not bool(torch.isfinite(action).all()):
+            raise RuntimeError("policy produced non-finite actions")
+        return action
 
     def run(self) -> None:
         cfg = self.cfg
         sch = cfg.schedule
+        if sch.wm_updates_per_policy_update < 1:
+            raise ValueError("schedule.wm_updates_per_policy_update must be >= 1")
+        if sch.wm_only_iterations < 0:
+            raise ValueError("schedule.wm_only_iterations must be >= 0")
         env = self.env
         obs, _ = env.reset()
         t_start = time.time()
@@ -202,6 +219,8 @@ class Trainer:
             t0 = time.perf_counter()
             action = self.act(obs)
             obs, rew, term, tout, _extras = env.step(action)
+            if not bool(torch.isfinite(obs["policy"]).all()) or not bool(torch.isfinite(rew).all()):
+                raise RuntimeError("environment produced non-finite observation/reward")
             self.ep_reward_sum += rew
             self.ep_len += 1
             done = term | tout
@@ -226,12 +245,20 @@ class Trainer:
                     self.wm_trainer.set_lr(lr)
                     self.policy_trainer.set_lr(lr * cfg.policy_trainer.lr / cfg.wm_trainer.lr)
                     t0 = time.perf_counter()
-                    m_wm = self.wm_trainer.update(self.buffer)
+                    m_wm = {}
+                    for _ in range(sch.wm_updates_per_policy_update):
+                        m_wm = self.wm_trainer.update(self.buffer)
                     torch.cuda.synchronize()
                     timers["wm"] += time.perf_counter() - t0
                     t0 = time.perf_counter()
-                    for _ in range(sch.policy_updates_per_wm_update):
-                        m_pi = self.policy_trainer.update(self.buffer)
+                    m_pi = {}
+                    actor_ready = (
+                        self.iteration - self.start_iteration >= sch.wm_only_iterations
+                    )
+                    if actor_ready:
+                        for _ in range(sch.policy_updates_per_wm_update):
+                            m_pi = self.policy_trainer.update(self.buffer)
+                        self.num_actor_updates += 1
                     torch.cuda.synchronize()
                     timers["policy"] += time.perf_counter() - t0
                     self.num_updates += 1
@@ -271,9 +298,19 @@ class Trainer:
                     tr = float("nan")
                 with torch.no_grad():
                     if self.is_main and self.buffer.size > 2048:
-                        err = self.wm_trainer.online_error(self.buffer, n=1024, k=8)
-                        self.writer.add_scalar("wm/online_nse_1step", float(err[0]), it)
-                        self.writer.add_scalar("wm/online_nse_8step", float(err[-1]), it)
+                        # Current-policy replay curve and a fixed 32-step batch
+                        # sampled once, so E1/E8/E32 share the same windows.
+                        err = self.wm_trainer.online_error(self.buffer, n=1024, k=32)
+                        if self._fixed_eval is None:
+                            self._fixed_eval = self.buffer.sample_windows(1024, 32)
+                        fixed_err = self.wm_trainer.error_on(self._fixed_eval)
+                        self.writer.add_scalar("wm/train_nse_1step", agg.get("wm/nse_1step", float("nan")) / max(agg_n, 1), it)
+                        self.writer.add_scalar("wm/eval_nse_1step", float(err[0]), it)
+                        self.writer.add_scalar("wm/eval_nse_8step", float(err[7]), it)
+                        self.writer.add_scalar("wm/eval_nse_32step", float(err[31]), it)
+                        self.writer.add_scalar("wm/fixed_nse_1step", float(fixed_err[0]), it)
+                        self.writer.add_scalar("wm/fixed_nse_8step", float(fixed_err[7]), it)
+                        self.writer.add_scalar("wm/fixed_nse_32step", float(fixed_err[31]), it)
                     else:
                         err = None
                 if self.is_main:
@@ -281,6 +318,7 @@ class Trainer:
                         self.writer.add_scalar(f"time/{k}_s_per_iter", v / sch.log_interval, it)
                     self.writer.add_scalar("time/hours", elapsed / 3600, it)
                     self.writer.add_scalar("time/updates", self.num_updates, it)
+                    self.writer.add_scalar("time/actor_updates", self.num_actor_updates, it)
                     self.writer.add_scalar("sampler/entropy", float(self.command.metrics["sampling_entropy"][0]), it)
                     self.writer.add_scalar("sampler/bin_return_mean", float(self.command.bin_return.mean()), it)
                     dt_log = time.time() - last_log
@@ -288,7 +326,12 @@ class Trainer:
                     msg = (
                         f"it {it} | {elapsed/3600:.2f} h | {sch.log_interval / dt_log:.1f} it/s | updates {self.num_updates} | "
                         f"train_ret {tr:.3f} (n={n_finished}) | "
-                        f"wm nse1 {agg.get('wm/nse_1step', float('nan'))/max(agg_n,1):.4f} nse8 {(float(err[-1]) if err is not None else float('nan')):.4f} | "
+                        f"wm train_nse1 {agg.get('wm/nse_1step', float('nan'))/max(agg_n,1):.4f} "
+                        f"eval_nse1 {(float(err[0]) if err is not None else float('nan')):.4f} "
+                        f"eval_nse8 {(float(err[7]) if err is not None else float('nan')):.4f} "
+                        f"eval_nse32 {(float(err[31]) if err is not None else float('nan')):.4f} "
+                        f"wm_gn {agg.get('wm/grad_norm', float('nan'))/max(agg_n,1):.3f} "
+                        f"pi_gn {agg.get('policy/policy_grad_norm', float('nan'))/max(agg_n,1):.3f} | "
                         f"imag_ret {agg.get('policy/imag_return_undisc', float('nan'))/max(agg_n,1):.3f} surv {agg.get('policy/imag_survival_H', float('nan'))/max(agg_n,1):.3f} | "
                         f"t sim/wm/pi {timers['sim']:.1f}/{timers['wm']:.1f}/{timers['policy']:.1f}s"
                     )

@@ -39,7 +39,14 @@ class EnvCfg:
 class ScheduleCfg:
     total_iterations: int = 320_000  # env steps (plan D12 reading A)
     updates_per_env_step: float = 0.4  # UTD
+    # plan7 scheme B: repeat WM updates per actor update.  1 keeps the
+    # upstream 1:1 ratio; 2 or 4 tests whether the WM can track the changing
+    # policy distribution.
+    wm_updates_per_policy_update: int = 1
     policy_updates_per_wm_update: int = 1
+    # Optional plan8 stage: keep collecting and updating the WM while Actor/Critic
+    # remain frozen for this many env iterations.  0 preserves the old schedule.
+    wm_only_iterations: int = 0
     warmup_iterations: int = 40  # env steps before the first update (fills k-step windows)
     lr_final_ratio: float = 0.03
     lr_decay_fraction: float = 250_000 / 320_000

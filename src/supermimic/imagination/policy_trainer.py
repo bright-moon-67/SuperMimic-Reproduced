@@ -57,6 +57,26 @@ class PolicyTrainer:
         feat = self.wm.spec.canonical(ro.states.reshape(H1 * n, -1)).reshape(H1, n, -1)
         return feat, ro.goals, ro.e_root
 
+    @staticmethod
+    def _finite(*tensors: torch.Tensor) -> bool:
+        return all(bool(torch.isfinite(t).all()) for t in tensors)
+
+    def _skip_actor(self, reason: str) -> dict[str, float]:
+        self.opt.zero_grad(set_to_none=True)
+        self.wm.requires_grad_(True)
+        self.critic.requires_grad_(True)
+        # Keep the metric schema stable for the training loop aggregator.
+        return {
+            "imag_objective": 0.0,
+            "imag_return_undisc": 0.0,
+            "imag_reward_mean": 0.0,
+            "imag_survival_H": 0.0,
+            "imag_dhat_mean": 0.0,
+            "policy_grad_norm": 0.0,
+            "action_abs_mean": 0.0,
+            "nan_skip": 1.0,
+        }
+
     def update(self, buffer: ReplayBuffer, xi_norm_fn=None) -> dict[str, float]:
         cfg = self.cfg
         start = buffer.sample_starts(cfg.batch_size, cfg.history)
@@ -66,11 +86,15 @@ class PolicyTrainer:
         self.wm.requires_grad_(False)
         self.critic.requires_grad_(False)
         ro = imagine(self.wm, self.policy, self.lib, start, cfg.horizon, cfg.future_frames, obs_noise=cfg.obs_noise, step_fn=self.step_fn, anchor_obs=cfg.anchor_obs)
+        if not self._finite(ro.states, ro.actions, ro.rewards, ro.dhat, ro.survival):
+            return self._skip_actor("non-finite rollout")
         _check_finite("rollout.states", ro.states)
         _check_finite("rollout.actions", ro.actions)
         _check_finite("rollout.rewards", ro.rewards)
         feat, goals, e_root = self._critic_inputs(ro)
         _check_finite("critic_feat", feat)
+        if not self._finite(feat):
+            return self._skip_actor("non-finite critic features")
         if cfg.use_critic:
             v_H = self.critic(feat[-1], goals[-1], xi_norm, e_root[-1])
         else:
@@ -79,17 +103,23 @@ class PolicyTrainer:
         loss = -J / cfg.horizon
         _check_finite("policy_objective", J.detach())
         _check_finite("policy_loss", loss.detach())
+        if not self._finite(J, loss):
+            return self._skip_actor("non-finite policy objective")
         self.opt.zero_grad(set_to_none=True)
         loss.backward()
         allreduce_grads(self.policy)
         for name, p in self.policy.named_parameters():
             _check_finite(f"policy_grad/{name}", p.grad if p.grad is not None else p)
+        if any(p.grad is not None and not bool(torch.isfinite(p.grad).all()) for p in self.policy.parameters()):
+            return self._skip_actor("non-finite policy gradient")
         gn = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), cfg.grad_clip_norm)
         _check_finite("policy_grad_norm", gn.detach())
+        if not self._finite(gn):
+            return self._skip_actor("non-finite grad norm")
         torch.nn.utils.clip_grad_value_(self.policy.parameters(), cfg.grad_clip_value)
         self.opt.step()
-        for name, p in self.policy.named_parameters():
-            _check_finite(f"policy_param/{name}", p.detach())
+        if any(not bool(torch.isfinite(p).all()) for p in self.policy.parameters()):
+            raise RuntimeError("policy parameters became non-finite after optimizer step")
         self.wm.requires_grad_(True)
         self.critic.requires_grad_(True)
 
@@ -101,6 +131,7 @@ class PolicyTrainer:
             "imag_dhat_mean": float(ro.dhat[1:].mean().detach()),
             "policy_grad_norm": float(gn),
             "action_abs_mean": float(ro.actions.abs().mean().detach()),
+            "nan_skip": 0.0,
         }
         for k, v in ro.reward_terms.items():
             metrics[f"imag_r/{k}"] = v

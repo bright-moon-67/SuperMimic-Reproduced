@@ -36,11 +36,18 @@ DATA=${DATA:-/root/autodl-tmp/data/npz/lafan1}
 RUN_NAME=${RUN_NAME:-lafan1_koopman_aligned}
 WM_TYPE=${WM_TYPE:-koopman}
 MLP_HIDDEN=${MLP_HIDDEN:-"2048 2048 2048"}
+KOOPMAN_DZ=${KOOPMAN_DZ:-128}
+KOOPMAN_RANK=${KOOPMAN_RANK:-8}
+KOOPMAN_ENC_HIDDEN=${KOOPMAN_ENC_HIDDEN:-"256 256"}
+KOOPMAN_DEC_HIDDEN=${KOOPMAN_DEC_HIDDEN:-"256 256"}
 LOG_ROOT=${LOG_ROOT:-/root/autodl-tmp/logs}
 NUM_ENVS=${NUM_ENVS:-8192}
 TOTAL_ITERATIONS=${TOTAL_ITERATIONS:-320000}
+WM_RATIO=${WM_RATIO:-1}
+WM_ONLY_ITERS=${WM_ONLY_ITERS:-0}
 MAX_HOURS=${MAX_HOURS:-}
 STAB=${STAB:-1}
+LAMBDA_STAB=${LAMBDA_STAB:-10.0}
 XI_STATE=${XI_STATE:-0}
 STATE_KOOPMAN=${STATE_KOOPMAN:-0}
 RESUME=${RESUME:-}
@@ -52,7 +59,7 @@ if [ "$STAB" = "1" ]; then
     STAB_ARGS=(
         --world-model.koopman.a-rho-target 0.99
         --world-model.koopman.stab-mode power
-        --world-model.koopman.lambda-stab 10.0
+        --world-model.koopman.lambda-stab "$LAMBDA_STAB"
         --world-model.koopman.stab-iters 10
         --world-model.koopman.stab-batch 256
     )
@@ -68,6 +75,7 @@ if [ "$STATE_KOOPMAN" = "1" ]; then
         --world-model.koopman.rank-domain 8
         --world-model.koopman.rank-action-domain 4
         --world-model.koopman.lambda-cons "${LAMBDA_CONS:-0.1}"
+        --world-model.koopman.lambda-rec-true "${LAMBDA_REC_TRUE:-0.0}"
         --world-model.koopman.cons-target-detach
         --world-model.koopman.lambda-lift-phys "${LAMBDA_LIFT_PHYS:-0.0}"
         --world-model.koopman.lambda-lift-phi "${LAMBDA_LIFT_PHI:-0.1}"
@@ -83,10 +91,10 @@ else
     WM_ARGS=(
         --world-model.type koopman
         --world-model.koopman-mode latent
-        --world-model.koopman.dz 128
-        --world-model.koopman.rank 8
-        --world-model.koopman.enc-hidden 256 256
-        --world-model.koopman.dec-hidden 256 256
+        --world-model.koopman.dz "$KOOPMAN_DZ"
+        --world-model.koopman.rank "$KOOPMAN_RANK"
+        --world-model.koopman.enc-hidden $KOOPMAN_ENC_HIDDEN
+        --world-model.koopman.dec-hidden $KOOPMAN_DEC_HIDDEN
     )
 fi
 
@@ -155,7 +163,9 @@ fi
     --policy-trainer.no-anchor-obs \
     --schedule.total-iterations "$TOTAL_ITERATIONS" \
     --schedule.updates-per-env-step 0.4 \
+    --schedule.wm-updates-per-policy-update "$WM_RATIO" \
     --schedule.policy-updates-per-wm-update 1 \
+    --schedule.wm-only-iterations "$WM_ONLY_ITERS" \
     --schedule.warmup-iterations 40 \
     --schedule.lr-final-ratio 0.03 \
     --schedule.lr-decay-fraction 0.78125 \
